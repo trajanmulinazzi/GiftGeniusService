@@ -1,9 +1,9 @@
 {
-  "name": "gift-app-llm",
-  "version": "1.0.0",
-  "description": "",
+  "name": "giftgenius-engine",
+  "version": "0.0.1",
+  "description": "Engine for the GiftGenius app",
   "license": "ISC",
-  "author": "",
+  "author": "azeng4499",
   "type": "module",
   "main": "index.js",
   "scripts": {
