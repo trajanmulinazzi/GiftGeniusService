@@ -9,6 +9,7 @@ import { appendFile } from "fs/promises";
 import { join } from "path";
 import { refillQueue } from "../services/refill.js";
 import { recordInteraction } from "../models/interaction.js";
+import { recordShown } from "../models/catalog.js";
 import { getFeed, updateTagWeights } from "../models/feed.js";
 import { updateTagWeightsFromInteraction } from "../services/ranking.js";
 
@@ -61,6 +62,8 @@ export class Queue {
 
     while (this.queue.length > 0) {
       const item = this.queue.shift();
+
+      await recordShown(item.id);
 
       const choice = await this.askUser(item);
 

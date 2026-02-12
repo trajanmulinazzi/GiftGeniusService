@@ -16,8 +16,16 @@ CREATE TABLE IF NOT EXISTS catalog (
   active INTEGER NOT NULL DEFAULT 1,
   last_refreshed TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now(),
+  times_shown INTEGER NOT NULL DEFAULT 0,
+  times_liked INTEGER NOT NULL DEFAULT 0,
+  last_shown_at TIMESTAMPTZ,
   UNIQUE(source, source_id)
 );
+
+-- Migration: add columns if upgrading from older schema
+ALTER TABLE catalog ADD COLUMN IF NOT EXISTS times_shown INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE catalog ADD COLUMN IF NOT EXISTS times_liked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE catalog ADD COLUMN IF NOT EXISTS last_shown_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_catalog_source ON catalog(source);
 CREATE INDEX IF NOT EXISTS idx_catalog_active ON catalog(active);

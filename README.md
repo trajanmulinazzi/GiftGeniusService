@@ -181,6 +181,9 @@ Global product inventory. Each item has:
 | `buy_url`   | Affiliate / purchase link           |
 | `tags`      | JSON array of categories (e.g. `["coffee", "gift"]`) |
 | `active`    | 1 = available, 0 = hidden           |
+| `times_shown` | Count of times product has been shown              |
+| `times_liked` | Count of times product was liked                   |
+| `last_shown_at` | When product was last shown (timestamp)          |
 
 Catalog updates are decoupled from the recommendation loop—run ingestion jobs on a schedule.
 

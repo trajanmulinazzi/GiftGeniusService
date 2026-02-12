@@ -1,4 +1,5 @@
 import { getDb, persistDb } from "../db/index.js";
+import { incrementTimesLiked } from "./catalog.js";
 
 /**
  * Interaction model - records like/pass/save for learning
@@ -11,6 +12,9 @@ export async function recordInteraction(feedId, catalogItemId, type) {
      ON CONFLICT(feed_id, catalog_item_id) DO UPDATE SET type = excluded.type`,
     [feedId, catalogItemId, type]
   );
+  if (type === "like") {
+    await incrementTimesLiked(catalogItemId);
+  }
   persistDb();
 }
 

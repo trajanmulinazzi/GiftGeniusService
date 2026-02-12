@@ -89,3 +89,25 @@ export async function getProductsByIds(ids) {
   );
   return result.rows;
 }
+
+/**
+ * Record that a catalog item was shown to a user.
+ */
+export async function recordShown(catalogItemId) {
+  const pool = await getDb();
+  await pool.query(
+    `UPDATE catalog SET times_shown = times_shown + 1, last_shown_at = now() WHERE id = $1`,
+    [catalogItemId]
+  );
+}
+
+/**
+ * Increment times_liked when a user likes a catalog item.
+ */
+export async function incrementTimesLiked(catalogItemId) {
+  const pool = await getDb();
+  await pool.query(
+    `UPDATE catalog SET times_liked = times_liked + 1 WHERE id = $1`,
+    [catalogItemId]
+  );
+}

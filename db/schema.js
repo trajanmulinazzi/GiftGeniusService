@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS catalog (
   active INTEGER NOT NULL DEFAULT 1,
   last_refreshed TEXT,
   created_at TEXT DEFAULT (datetime('now')),
+  times_shown INTEGER NOT NULL DEFAULT 0,
+  times_liked INTEGER NOT NULL DEFAULT 0,
+  last_shown_at TEXT,
   UNIQUE(source, source_id)
 );
 
