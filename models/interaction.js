@@ -35,3 +35,33 @@ export async function getInteractionsForFeed(feedId) {
   );
   return result.rows;
 }
+
+/**
+ * Get catalog items that were liked for a feed.
+ */
+export async function getLikedItems(feedId) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `SELECT c.* FROM catalog c
+     INNER JOIN interactions i ON i.catalog_item_id = c.id
+     WHERE i.feed_id = $1 AND i.type = 'like'
+     ORDER BY i.created_at DESC`,
+    [feedId]
+  );
+  return result.rows;
+}
+
+/**
+ * Get catalog items that were passed (disliked) for a feed.
+ */
+export async function getDislikedItems(feedId) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `SELECT c.* FROM catalog c
+     INNER JOIN interactions i ON i.catalog_item_id = c.id
+     WHERE i.feed_id = $1 AND i.type = 'pass'
+     ORDER BY i.created_at DESC`,
+    [feedId]
+  );
+  return result.rows;
+}

@@ -31,9 +31,19 @@ CREATE INDEX IF NOT EXISTS idx_catalog_source ON catalog(source);
 CREATE INDEX IF NOT EXISTS idx_catalog_active ON catalog(active);
 CREATE INDEX IF NOT EXISTS idx_catalog_price ON catalog(price_cents);
 
--- Feeds: personalized recommendation contexts (one per recipient/gift list)
+-- Users: app users (gift-givers), each with multiple feeds (recipients)
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Feeds: personalized recommendation contexts (one per recipient in user's life)
 CREATE TABLE IF NOT EXISTS feeds (
   id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
   name TEXT NOT NULL,
   age_min INTEGER,
   age_max INTEGER,
@@ -45,6 +55,21 @@ CREATE TABLE IF NOT EXISTS feeds (
   tag_weights TEXT NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Migration: add user_id to feeds for existing schemas
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'feeds' AND column_name = 'user_id') THEN
+    INSERT INTO users (name) SELECT 'Default User' WHERE NOT EXISTS (SELECT 1 FROM users LIMIT 1);
+    ALTER TABLE feeds ADD COLUMN user_id INTEGER REFERENCES users(id);
+    UPDATE feeds SET user_id = (SELECT id FROM users ORDER BY id LIMIT 1) WHERE user_id IS NULL;
+    ALTER TABLE feeds ALTER COLUMN user_id SET NOT NULL;
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL; -- Ignore if already migrated
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_feeds_user ON feeds(user_id);
 
 -- Interactions: what the user did with each item (learning signal)
 CREATE TABLE IF NOT EXISTS interactions (

@@ -27,9 +27,19 @@ CREATE INDEX IF NOT EXISTS idx_catalog_source ON catalog(source);
 CREATE INDEX IF NOT EXISTS idx_catalog_active ON catalog(active);
 CREATE INDEX IF NOT EXISTS idx_catalog_price ON catalog(price_cents);
 
+-- Users: app users (gift-givers), each with multiple feeds (recipients)
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Feeds: personalized recommendation contexts (one per recipient/gift list)
 CREATE TABLE IF NOT EXISTS feeds (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
   name TEXT NOT NULL,
   age_min INTEGER,
   age_max INTEGER,
