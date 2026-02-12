@@ -112,6 +112,22 @@ docker-compose up -d
 npm run db:migrate
 ```
 
+### View the database (optional)
+
+Connect to Postgres via psql:
+
+```bash
+docker exec -it giftgenius-postgres psql -U giftgenius -d giftgenius
+```
+
+Useful commands inside psql:
+- `\dt` — list tables
+- `SELECT * FROM interactions;` — view liked/passed/saved items
+- `SELECT * FROM catalog LIMIT 5;` — sample products
+- `\q` — quit
+
+Or use a GUI (pgAdmin, DBeaver, TablePlus) with: host `localhost`, port `5432`, user `giftgenius`, password `giftgenius`, database `giftgenius`.
+
 ### Seed the catalog
 
 Run once (or whenever you add new products):
