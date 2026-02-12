@@ -7,13 +7,14 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "ingest": "node scripts/ingest-catalog.js",
+    "db:migrate": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.73.0",
     "@clack/prompts": "^1.0.0",
     "dotenv": "^17.2.4",
-    "openai": "^6.17.0",
-    "readline": "^1.3.0"
+    "pg": "^8.18.0"
   }
 }

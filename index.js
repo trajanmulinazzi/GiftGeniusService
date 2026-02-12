@@ -1,18 +1,23 @@
 import { Queue } from "./classes/queue.js";
-import { User } from "./classes/user.js";
-import { Generate } from "./generate.js";
+import { createFeed } from "./models/feed.js";
+import { refillQueue } from "./services/refill.js";
+import { getDb } from "./db/index.js";
 
 (async () => {
-  const user = new User(
-    27,
-    "female",
-    "girlfriend",
-    ["rock-climbing", "coffee", "fantasy books"],
-    30,
-    80,
-  );
-  const queue = new Queue(user);
+  await getDb();
 
-  const initItems = await Generate(user.getProfile(), user.getLikedItems(), user.getDislikedItems());
-  queue.add(initItems.ideas);
+  const feedId = await createFeed({
+    name: "Girlfriend",
+    ageMin: 25,
+    ageMax: 30,
+    relationship: "girlfriend",
+    interests: ["rock-climbing", "coffee", "fantasy books"],
+    budgetMin: 30,
+    budgetMax: 80,
+    occasion: null,
+  });
+
+  const queue = new Queue(feedId);
+  const initItems = await refillQueue(feedId);
+  queue.add(initItems);
 })();
