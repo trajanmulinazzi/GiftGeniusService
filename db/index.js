@@ -1,3 +1,8 @@
+/**
+ * Database connection - PostgreSQL pool for GiftGenius.
+ * Loads config from DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE.
+ */
+
 import pg from "pg";
 import dotenv from "dotenv";
 

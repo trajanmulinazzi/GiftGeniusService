@@ -1,4 +1,5 @@
 -- GiftGenius Engine - PostgreSQL schema
+-- Defines tables: catalog, users, feeds, interactions
 -- Run with: psql -U giftgenius -d giftgenius -f db/schema.pg.sql
 -- Or via docker: docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql
 

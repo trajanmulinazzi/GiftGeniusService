@@ -1,10 +1,10 @@
-import {
-  intro,
-  select,
-  spinner,
-  isCancel,
-  cancel,
-} from "@clack/prompts";
+/**
+ * Queue - displays catalog items one-by-one, captures like/pass/save feedback,
+ * triggers background refill when low, and updates feed preferences.
+ */
+// NEED to find the optimal REFILL_THRESHOLD
+
+import { intro, select, spinner, isCancel, cancel } from "@clack/prompts";
 import { appendFile } from "fs/promises";
 import { join } from "path";
 import { refillQueue } from "../services/refill.js";
@@ -47,9 +47,7 @@ export class Queue {
 
   formatProduct(item) {
     const price =
-      item.price_cents != null
-        ? `$${(item.price_cents / 100).toFixed(2)}`
-        : "";
+      item.price_cents != null ? `$${(item.price_cents / 100).toFixed(2)}` : "";
     const parts = [item.title];
     if (price) parts.push(price);
     if (item.buy_url) parts.push(`\n  ${item.buy_url}`);
@@ -75,7 +73,10 @@ export class Queue {
       // Record interaction and update tag weights
       await recordInteraction(this.feedId, item.id, choice);
       const feed = await getFeed(this.feedId);
-      const tags = typeof item.tags === "string" ? JSON.parse(item.tags || "[]") : (item.tags || []);
+      const tags =
+        typeof item.tags === "string"
+          ? JSON.parse(item.tags || "[]")
+          : item.tags || [];
       const nextWeights = updateTagWeightsFromInteraction(
         feed?.tag_weights || {},
         tags,
@@ -90,7 +91,11 @@ export class Queue {
           .then((items) => {
             this.add(items);
             this.backgroundRefill = false;
-            this.log("Background refill completed, added", items.length, "items");
+            this.log(
+              "Background refill completed, added",
+              items.length,
+              "items"
+            );
           })
           .catch((error) => {
             this.backgroundRefill = false;

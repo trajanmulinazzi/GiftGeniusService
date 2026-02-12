@@ -1,3 +1,8 @@
+/**
+ * GiftGenius Engine - CLI entry point
+ * Prompts for user and feed selection/creation, then runs the gift recommendation queue.
+ */
+
 import { intro, select, text, isCancel, cancel } from "@clack/prompts";
 import { Queue } from "./classes/queue.js";
 import { createUser, listUsers } from "./models/user.js";

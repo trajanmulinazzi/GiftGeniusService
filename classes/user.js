@@ -1,3 +1,8 @@
+/**
+ * Legacy User class (unused) - superseded by models/user.js and the feeds system.
+ * Kept for reference.
+ */
+
 export class User {
   constructor(age, gender, relationship, hobbies, budget_min, budget_max) {
     this.profile = {
