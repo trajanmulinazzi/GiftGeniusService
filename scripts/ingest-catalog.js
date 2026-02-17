@@ -3,10 +3,17 @@
  * Catalog ingestion script (out of band)
  * Seeds or refreshes the product catalog from retailer APIs or curated lists.
  * Run separately from the recommendation loop.
+ *
+ * Usage:
+ *   npm run ingest              - Ingest sample products
+ *   npm run ingest -- --amazon  - Search Amazon and ingest (uses AMAZON_* env)
+ *   npm run ingest -- --amazon --keywords "gift for dad" --count 20
  */
 
+import "dotenv/config";
 import { upsertProduct } from "../models/catalog.js";
 import { getDb } from "../db/index.js";
+import { searchProducts } from "../services/amazon-api.js";
 
 const SAMPLE_PRODUCTS = [
   {
@@ -111,12 +118,41 @@ const SAMPLE_PRODUCTS = [
   },
 ];
 
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const opts = { amazon: false, keywords: "gift ideas", count: 10 };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--amazon") opts.amazon = true;
+    if (args[i] === "--keywords" && args[i + 1]) opts.keywords = args[++i];
+    if (args[i] === "--count" && args[i + 1]) opts.count = parseInt(args[++i], 10) || 10;
+  }
+  return opts;
+}
+
 async function run() {
+  const opts = parseArgs();
+
   await getDb();
-  for (const product of SAMPLE_PRODUCTS) {
+
+  let products;
+  if (opts.amazon) {
+    console.log(`Searching Amazon for "${opts.keywords}" (${opts.count} items)...`);
+    products = await searchProducts(opts.keywords, {
+      searchIndex: "All",
+      itemCount: opts.count,
+    });
+    if (!products.length) {
+      console.warn("No products returned from Amazon. Check credentials and try different keywords.");
+      process.exit(0);
+    }
+  } else {
+    products = SAMPLE_PRODUCTS;
+  }
+
+  for (const product of products) {
     await upsertProduct(product);
   }
-  console.log(`Ingested ${SAMPLE_PRODUCTS.length} products into catalog.`);
+  console.log(`Ingested ${products.length} products into catalog.`);
 }
 
 run().catch((err) => {

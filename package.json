@@ -10,9 +10,11 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
     "ingest": "node scripts/ingest-catalog.js",
+    "ingest:amazon": "node scripts/ingest-catalog.js --amazon",
     "db:migrate": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {
+    "@amzn/creatorsapi-nodejs-sdk": "file:../creatorsapi-nodejs-sdk",
     "@clack/prompts": "^1.0.0",
     "dotenv": "^17.2.4",
     "pg": "^8.18.0"
