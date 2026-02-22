@@ -14,6 +14,9 @@ const SEARCH_RESOURCES = [
   "images.primary.medium",
   "itemInfo.title",
   "itemInfo.features",
+  "itemInfo.classifications",
+  "itemInfo.byLineInfo",
+  "itemInfo.productInfo",
   "offersV2.listings.price",
   "offersV2.listings.availability",
 ];
@@ -22,6 +25,9 @@ const GET_ITEMS_RESOURCES = [
   "images.primary.medium",
   "itemInfo.title",
   "itemInfo.features",
+  "itemInfo.classifications",
+  "itemInfo.byLineInfo",
+  "itemInfo.productInfo",
   "offersV2.listings.price",
 ];
 
@@ -51,7 +57,27 @@ function getApi() {
 }
 
 /**
+ * Turn a display value into a tag: lowercase, alphanumeric + hyphens, max length.
+ */
+function toTag(value, maxLen = 40) {
+  if (value == null || value === "") return null;
+  const s = String(value).toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, "-").replace(/^-|-$/g, "");
+  return s.slice(0, maxLen) || null;
+}
+
+/**
+ * Extract keyword from a feature string (one short word) for tagging.
+ */
+function featureToTag(feature) {
+  if (typeof feature !== "string" || !feature.trim()) return null;
+  const words = feature.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4);
+  return words[0]?.slice(0, 30) || null;
+}
+
+/**
  * Map Amazon API item to catalog product shape.
+ * Uses tags returned by Amazon: Classifications (ProductGroup, Binding), ByLineInfo (Brand),
+ * ProductInfo (Color, Size), and Features (keyword from each).
  * @param {object} item - Raw item from SearchItems/GetItems response
  * @param {string} partnerTag
  * @returns {object}
@@ -86,10 +112,34 @@ function itemToProduct(item, partnerTag) {
       ? `https://www.amazon.com/dp/${asin}${partnerTag ? `?tag=${partnerTag}` : ""}`
       : null);
 
-  const features = item.itemInfo?.features?.displayValues || [];
-  const tags = Array.isArray(features)
-    ? features.slice(0, 5).map((f) => (typeof f === "string" ? f.slice(0, 50) : String(f).slice(0, 50)))
-    : [];
+  const tags = [];
+  const seen = new Set();
+
+  const add = (tag) => {
+    if (tag && !seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  };
+
+  const itemInfo = item.itemInfo || {};
+  const classif = itemInfo.classifications || {};
+  add(toTag(classif.productGroup?.displayValue));
+  add(toTag(classif.binding?.displayValue));
+
+  const byLine = itemInfo.byLineInfo || {};
+  add(toTag(byLine.brand?.displayValue));
+
+  const productInfo = itemInfo.productInfo || {};
+  add(toTag(productInfo.color?.displayValue));
+  add(toTag(productInfo.size?.displayValue));
+
+  const features = itemInfo.features?.displayValues || [];
+  if (Array.isArray(features)) {
+    for (const f of features.slice(0, 5)) {
+      add(featureToTag(typeof f === "string" ? f : String(f)));
+    }
+  }
 
   return {
     source_id: asin,
@@ -99,7 +149,7 @@ function itemToProduct(item, partnerTag) {
     price_cents: priceCents,
     currency,
     buy_url: buyUrl,
-    tags,
+    tags: tags.filter(Boolean),
     active: true,
   };
 }

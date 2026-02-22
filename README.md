@@ -345,6 +345,23 @@ Then run `npm run ingest`.
 
 **Amazon Creators API** (implemented): Set `AMAZON_CREDENTIAL_ID`, `AMAZON_CREDENTIAL_SECRET`, `AMAZON_PARTNER_TAG` in `.env.local`. Use `npm run ingest -- --amazon` when your Associates account meets eligibility (e.g. 10 qualifying sales in 30 days). Requires the `@amzn/creatorsapi-nodejs-sdk` (see repo or local path in package.json).
 
+#### Amazon API: what we request and what we use
+
+We call **SearchItems** (and optionally **GetItems**) and request these resources:
+
+| Resource | What the API returns | What we use |
+|----------|---------------------|-------------|
+| `images.primary.medium` | Primary product image URL | `image_url` |
+| `itemInfo.title` | Product title (displayValue / label) | `title` |
+| `itemInfo.features` | List of feature strings (displayValues) | **Tags**: one keyword (≥4 chars) per feature, up to 5 |
+| `itemInfo.classifications` | ProductGroup, Binding (category names) | **Tags**: slugified ProductGroup and Binding |
+| `itemInfo.byLineInfo` | Brand, Manufacturer | **Tags**: slugified Brand |
+| `itemInfo.productInfo` | Color, Size, etc. | **Tags**: slugified Color and Size |
+| `offersV2.listings.price` | Price (amount, currency) | `price_cents`, `currency` |
+| `offersV2.listings.availability` | Availability (search only) | Not stored |
+
+**Catalog fields we fill:** `source_id` (ASIN), `source` (`"amazon"`), `title`, `image_url`, `price_cents`, `currency`, `buy_url` (detail page + partner tag), `tags` (all of the above tag sources combined, normalized to lowercase hyphenated slugs), `active`.
+
 Both paths map API responses to the catalog schema and call `upsertProduct()` from `models/catalog.js`. The recommendation engine always reads from the local catalog; it never calls retailer APIs during the swipe loop.
 
 ---
