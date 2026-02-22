@@ -27,6 +27,26 @@ export async function getSeenCatalogIds(feedId) {
   return result.rows.map((r) => r.catalog_item_id);
 }
 
+/**
+ * Get already-seen (source, source_id) for this feed for filtering API results.
+ * @param {number} feedId
+ * @returns {Promise<Set<string>>} Set of "source:source_id" (e.g. "amazon:B08XYZ")
+ */
+export async function getSeenSourceIds(feedId) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `SELECT c.source, c.source_id FROM interactions i
+     INNER JOIN catalog c ON c.id = i.catalog_item_id
+     WHERE i.feed_id = $1`,
+    [feedId]
+  );
+  const set = new Set();
+  for (const row of result.rows) {
+    set.add(`${row.source}:${row.source_id}`);
+  }
+  return set;
+}
+
 export async function getInteractionsForFeed(feedId) {
   const pool = await getDb();
   const result = await pool.query(

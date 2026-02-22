@@ -1,8 +1,7 @@
 /**
- * Queue - displays catalog items one-by-one, captures like/pass/save feedback,
- * triggers background refill when low, and updates feed preferences.
+ * Queue - displays catalog items one-by-one from persisted queue,
+ * captures like/pass/save feedback, triggers background refill when ≤3 remain.
  */
-// NEED to find the optimal REFILL_THRESHOLD
 
 import { intro, select, spinner, isCancel, cancel } from "@clack/prompts";
 import { appendFile } from "fs/promises";
@@ -12,12 +11,12 @@ import { recordInteraction } from "../models/interaction.js";
 import { recordShown } from "../models/catalog.js";
 import { getFeed, updateTagWeights } from "../models/feed.js";
 import { updateTagWeightsFromInteraction } from "../services/ranking.js";
+import { getNextAndDequeue, getQueueSize } from "../models/queue.js";
 
-const REFILL_THRESHOLD = 5;
+const REFILL_THRESHOLD = 3;
 
 export class Queue {
   constructor(feedId) {
-    this.queue = [];
     this.feedId = feedId;
     this.isProcessing = false;
     this.spinner = spinner();
@@ -38,13 +37,6 @@ export class Queue {
     }
   }
 
-  add(items) {
-    this.queue.push(...items);
-    if (!this.isProcessing) {
-      this.processQueue();
-    }
-  }
-
   formatProduct(item) {
     const price =
       item.price_cents != null ? `$${(item.price_cents / 100).toFixed(2)}` : "";
@@ -58,19 +50,32 @@ export class Queue {
     this.isProcessing = true;
     this.spinner.stop("Loaded more gift ideas");
 
-    while (this.queue.length > 0) {
-      const item = this.queue.shift();
+    while (true) {
+      let item = await getNextAndDequeue(this.feedId);
+      if (!item) {
+        const added = await refillQueue(this.feedId);
+        if (added === 0) {
+          this.log("Refill returned no items for feed", this.feedId);
+          this.spinner.stop("No more ideas right now. Try again later.");
+          break;
+        }
+        continue;
+      }
 
       await recordShown(item.id);
+
+      const itemLog = { id: item.id, source_id: item.source_id, title: (item.title || "").slice(0, 60) };
+      await this.log("Showing item:", JSON.stringify(itemLog));
+      if (process.env.LOG_REFILL === "1" || process.env.DEBUG === "refill") {
+        console.log("[queue] Showing:", item.title, `(id=${item.id}, source_id=${item.source_id})`);
+      }
 
       const choice = await this.askUser(item);
 
       if (choice === null) {
-        // User cancelled
         return;
       }
 
-      // Record interaction and update tag weights
       await recordInteraction(this.feedId, item.id, choice);
       const feed = await getFeed(this.feedId);
       const tags =
@@ -84,18 +89,14 @@ export class Queue {
       );
       await updateTagWeights(this.feedId, nextWeights);
 
-      if (this.queue.length <= REFILL_THRESHOLD && !this.backgroundRefill) {
+      const remaining = await getQueueSize(this.feedId);
+      if (remaining <= REFILL_THRESHOLD && !this.backgroundRefill) {
         this.log("Background refill started for feed", this.feedId);
         this.backgroundRefill = true;
         refillQueue(this.feedId)
-          .then((items) => {
-            this.add(items);
+          .then((count) => {
             this.backgroundRefill = false;
-            this.log(
-              "Background refill completed, added",
-              items.length,
-              "items"
-            );
+            this.log("Background refill completed, added", count, "items");
           })
           .catch((error) => {
             this.backgroundRefill = false;
@@ -105,7 +106,6 @@ export class Queue {
     }
 
     this.isProcessing = false;
-    this.spinner.start("Loading more gift ideas");
   }
 
   async askUser(item) {

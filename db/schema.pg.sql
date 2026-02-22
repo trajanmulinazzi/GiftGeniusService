@@ -84,3 +84,13 @@ CREATE TABLE IF NOT EXISTS interactions (
 
 CREATE INDEX IF NOT EXISTS idx_interactions_feed ON interactions(feed_id);
 CREATE INDEX IF NOT EXISTS idx_interactions_catalog ON interactions(catalog_item_id);
+
+-- Per-feed persisted queue (~6 items); refill when ≤3 remain
+CREATE TABLE IF NOT EXISTS queue_items (
+  id SERIAL PRIMARY KEY,
+  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_items_feed ON queue_items(feed_id);

@@ -1,49 +1,66 @@
 /**
- * Refill service - fetches candidates from catalog, ranks them, returns top N
- * Replaces LLM "generation" with catalog retrieval + ranking
+ * Refill service - fetches items from Amazon Creator API (fallback: Canopy),
+ * filters already-seen and budget, upserts to catalog, ranks, appends to persisted queue.
  */
 
-import { getActiveProducts } from "../models/catalog.js";
-import { getFeed, updateTagWeights } from "../models/feed.js";
-import { getSeenCatalogIds } from "../models/interaction.js";
+import { appendFile } from "fs/promises";
+import { join } from "path";
+import * as amazonApi from "./amazon-api.js";
+import * as canopyApi from "./canopy-api.js";
+import { getFeed, getSearchTermsForRefill } from "../models/feed.js";
+import { getSeenSourceIds } from "../models/interaction.js";
+import { upsertProduct, getProductsByIds } from "../models/catalog.js";
+import { appendToQueue, getQueueSize } from "../models/queue.js";
 import { rankItems } from "./ranking.js";
 
-const REFILL_BATCH_SIZE = 5;
-const CANDIDATE_POOL_SIZE = 200;
+const REFILL_TARGET_SIZE = 6;
+const REFILL_THRESHOLD = 3;
+const API_ITEM_COUNT = 10;
+
+const QUEUE_LOG = join(process.cwd(), "queue.log");
+const LOG_TO_CONSOLE = process.env.LOG_REFILL === "1" || process.env.DEBUG === "refill";
+
+async function logRefill(message, detail = null) {
+  const line = detail != null ? `${message} ${JSON.stringify(detail)}` : message;
+  const timestamp = new Date().toISOString();
+  const logLine = `[${timestamp}] [refill] ${line}\n`;
+  try {
+    await appendFile(QUEUE_LOG, logLine);
+  } catch (_) {}
+  if (LOG_TO_CONSOLE) {
+    console.log(`[refill] ${line}`);
+  }
+}
 
 /**
- * Get the next batch of ranked catalog items for a feed.
- * Excludes already-seen items, applies budget filter, ranks by preferences.
- * @param {number} feedId
- * @returns {Promise<Object[]>} array of catalog items (with parsed tags)
+ * Fetch products from API: try Amazon first, fallback to Canopy.
+ * @param {string} searchTerm
+ * @returns {Promise<{ products: object[], source: 'amazon'|'canopy' }>}
  */
-export async function refillQueue(feedId) {
-  const feed = await getFeed(feedId);
-  if (!feed) return [];
+async function fetchFromApi(searchTerm) {
+  try {
+    const products = await amazonApi.searchProducts(searchTerm, { itemCount: API_ITEM_COUNT });
+    return { products, source: "amazon" };
+  } catch (_) {
+    const products = await canopyApi.searchProducts(searchTerm, { limit: 20 });
+    return { products, source: "canopy" };
+  }
+}
 
-  const seenIds = await getSeenCatalogIds(feedId);
-  const seenSet = new Set(seenIds);
-
-  // Fetch candidate pool with budget filter
-  const candidates = await getActiveProducts(feed.budget_min, feed.budget_max);
-
-  // Exclude seen items
-  const unseen = candidates.filter((c) => !seenSet.has(c.id));
-  if (unseen.length === 0) return [];
-
-  // Limit pool size for performance
-  const pool = unseen.slice(0, CANDIDATE_POOL_SIZE);
-
-  // Parse tags for ranking (rankItems expects objects)
-  const parsed = pool.map((p) => ({
-    ...p,
-    tags: parseTags(p.tags),
-  }));
-
-  const ranked = rankItems(parsed, feed);
-  const top = ranked.slice(0, REFILL_BATCH_SIZE);
-
-  return top;
+/**
+ * Filter by budget (feed budget_min/budget_max in dollars; product price_cents).
+ */
+function inBudget(product, feed) {
+  const cents = product.price_cents;
+  if (feed.budget_min != null) {
+    const minCents = Math.round(feed.budget_min * 100);
+    if (cents != null && cents < minCents) return false;
+  }
+  if (feed.budget_max != null) {
+    const maxCents = Math.round(feed.budget_max * 100);
+    if (cents != null && cents > maxCents) return false;
+  }
+  return true;
 }
 
 function parseTags(tags) {
@@ -56,4 +73,60 @@ function parseTags(tags) {
     }
   }
   return [];
+}
+
+/**
+ * Refill the persisted queue for a feed: call API with search terms (interests or top tags),
+ * filter already-seen and budget, upsert to catalog, rank, append up to REFILL_TARGET_SIZE.
+ * Only calls API again in same refill if queue would still be below REFILL_THRESHOLD after adding.
+ * @param {number} feedId
+ * @returns {Promise<number>} count of items added to queue
+ */
+export async function refillQueue(feedId) {
+  const feed = await getFeed(feedId);
+  if (!feed) return 0;
+
+  const queueSize = await getQueueSize(feedId);
+  const isInitial = queueSize === 0;
+  const searchTerms = await getSearchTermsForRefill(feedId, isInitial);
+  if (!searchTerms.length) return 0;
+
+  const seenSet = await getSeenSourceIds(feedId);
+  const candidateIds = [];
+
+  await logRefill(`feedId=${feedId} isInitial=${isInitial} searchTerms=`, searchTerms);
+
+  for (const term of searchTerms) {
+    const { products, source } = await fetchFromApi(term);
+    await logRefill(`term="${term}" ${source} API: ${products.length} items`, products.map((p) => ({ source_id: p.source_id, title: (p.title || "").slice(0, 60), price_cents: p.price_cents })));
+    for (const p of products) {
+      const key = `${p.source || "amazon"}:${p.source_id}`;
+      if (seenSet.has(key)) continue;
+      if (!inBudget(p, feed)) continue;
+
+      const id = await upsertProduct(p);
+      if (id) {
+        seenSet.add(key);
+        candidateIds.push(id);
+      }
+    }
+    if (candidateIds.length >= REFILL_TARGET_SIZE) break;
+    if (candidateIds.length >= REFILL_THRESHOLD && searchTerms.indexOf(term) === searchTerms.length - 1) break;
+  }
+
+  if (candidateIds.length === 0) return 0;
+
+  const rows = await getProductsByIds(candidateIds);
+  const parsed = rows.map((p) => ({
+    ...p,
+    tags: parseTags(p.tags),
+  }));
+  const ranked = rankItems(parsed, feed);
+  const toAdd = ranked.slice(0, REFILL_TARGET_SIZE).map((r) => r.id);
+  const addedRows = ranked.slice(0, REFILL_TARGET_SIZE);
+
+  await logRefill(`adding to queue: ${addedRows.length} items`, addedRows.map((r) => ({ id: r.id, source_id: r.source_id, title: (r.title || "").slice(0, 60), price_cents: r.price_cents })));
+
+  await appendToQueue(feedId, toAdd);
+  return toAdd.length;
 }

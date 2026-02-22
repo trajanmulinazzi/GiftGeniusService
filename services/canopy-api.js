@@ -86,6 +86,8 @@ function withAffiliateTag(url, partnerTag) {
 
 /**
  * Map Canopy search result item to catalog product shape.
+ * Search API does not return categories/featureBullets per item, so we derive tags
+ * from the search term (same for all) + each item's title + prime/rating when present.
  * @param {object} item - Raw item from Canopy search
  * @param {string} [partnerTag] - Amazon Associate tag for buy_url
  * @param {string} [searchTerm] - Query used to find this product (for tagging)
@@ -105,6 +107,7 @@ function itemToProduct(item, partnerTag, searchTerm) {
   const rawUrl = item.url || `https://www.amazon.com/dp/${asin}`;
   const buyUrl = withAffiliateTag(rawUrl, partnerTag);
 
+  // Derived tags: search API doesn't include categories per item
   const tags = [];
   tags.push(...tagsFromSearchTerm(searchTerm));
   tags.push(...tagsFromTitle(title));

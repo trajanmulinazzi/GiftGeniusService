@@ -13,8 +13,12 @@ A catalog-driven gift recommendation engine that selects real, purchasable produ
   - [Getting Started](#getting-started)
     - [Prerequisites](#prerequisites)
     - [Install](#install)
-    - [Seed the catalog](#seed-the-catalog)
+    - [Start Postgres](#start-postgres)
+    - [Set up API keys](#set-up-api-keys-required-for-running-the-app)
     - [Run the app](#run-the-app)
+    - [View the database](#view-the-database-optional)
+    - [Optional: seed or backfill](#optional-seed-or-backfill-the-catalog)
+    - [Testing](#testing)
   - [Project Structure](#project-structure)
   - [Core Concepts](#core-concepts)
     - [Catalog](#catalog)
@@ -59,9 +63,10 @@ For full vision, data flow, and file map see **[ARCHITECTURE.md](./ARCHITECTURE.
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                            Queue                                 │
+│                     Queue (persisted, ~6 items)                   │
 │  • Shows items one at a time                                     │
-│  • Triggers background refill when ≤ 5 items remain              │
+│  • Triggers background refill when ≤ 3 items remain              │
+│  • Refill calls Amazon (or Canopy) API with top tags/interests   │
 │  • Records interactions and updates tag weights                  │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
@@ -69,26 +74,26 @@ For full vision, data flow, and file map see **[ARCHITECTURE.md](./ARCHITECTURE.
           ▼                   ▼                   ▼
 ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
 │     Refill      │  │   Interaction   │  │    Ranking      │
-│  (fetch, rank,  │  │   (persist      │  │  (tag weights,  │
-│   enqueue)      │  │    like/pass/   │  │   scoring)      │
-│                 │  │    save)        │  │                 │
+│  (API fetch,    │  │   (persist      │  │  (tag weights,  │
+│   filter, rank, │  │    like/pass/   │  │   scoring)      │
+│   upsert, queue)│  │    save)        │  │                 │
 └────────┬────────┘  └────────┬────────┘  └────────┬────────┘
          │                    │                    │
          └────────────────────┼────────────────────┘
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     PostgreSQL (Docker)                          │
-│  catalog | feeds | interactions                                  │
+│  catalog (cache) | feeds | interactions | queue_items            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 **Data flow:**
 
-1. User creates a **Feed** (name, budget, interests, relationship).
-2. **Refill** pulls candidates from the catalog, filters by budget and unseen items, ranks them, and enqueues the top N.
-3. User sees products in the **Queue** and responds with Like, Pass, or Save.
+1. User creates a **Feed** (name, budget, **interests**, relationship).
+2. **Refill** calls Amazon Creators API (or Canopy) with the feed’s interests or top tags, filters already-seen and budget, upserts to catalog, ranks, and appends to the **persisted queue**.
+3. User sees products one at a time from the queue and responds with Like, Pass, or Save.
 4. Each response is stored as an **Interaction** and used to update **tag weights**.
-5. When the queue drops to ≤ 5 items, a new refill runs in the background; the user continues without waiting.
+5. When the queue has ≤ 3 items, a background refill runs (API + top tags); the user continues without waiting.
 
 ---
 
@@ -114,6 +119,30 @@ docker-compose up -d
 npm run db:migrate
 ```
 
+The schema includes `catalog`, `users`, `feeds`, `interactions`, and `queue_items` (persisted per-feed queue). Run `db:migrate` after any schema change.
+
+### Set up API keys (required for running the app)
+
+The app fills the queue by calling **Amazon Creators API** (primary) or **Canopy API** (fallback). Set at least one in `.env.local`:
+
+- **Amazon** (recommended): `AMAZON_CREDENTIAL_ID`, `AMAZON_CREDENTIAL_SECRET`, `AMAZON_PARTNER_TAG`
+- **Canopy** (fallback): `CANOPY_API_KEY` (e.g. if Amazon isn’t configured or fails)
+
+See [Environment](#environment) and `.env.example` for all options.
+
+### Run the app
+
+```bash
+npm start
+```
+
+1. Choose or create a **user**, then choose or create a **feed** (recipient name, relationship, **interests** — comma-separated hobbies/interests — and budget).
+2. The first run fetches products from the API using the feed’s **interests**, fills a persisted queue (~6 items), then shows one product at a time.
+3. Use the arrow keys and Enter to choose **Like**, **Pass**, or **Save**. Each action updates the feed’s tag weights. When the queue has ≤3 items, more are fetched in the background using the feed’s **top tags**.
+4. Press **Ctrl+C** to exit. The queue is saved; next time you open the same feed, you continue from the same queue.
+
+You do **not** need to seed the catalog before running; refill fetches from the API when the queue is empty or low.
+
 ### View the database (optional)
 
 Connect to Postgres via psql:
@@ -124,32 +153,43 @@ docker exec -it giftgenius-postgres psql -U giftgenius -d giftgenius
 
 Useful commands inside psql:
 - `\dt` — list tables
-- `SELECT * FROM interactions;` — view liked/passed/saved items
-- `SELECT * FROM catalog LIMIT 5;` — sample products
+- `SELECT * FROM queue_items;` — current queue entries per feed
+- `SELECT * FROM interactions;` — liked/passed/saved items
+- `SELECT * FROM catalog LIMIT 5;` — cached products (from refill)
 - `\q` — quit
 
 Or use a GUI (pgAdmin, DBeaver, TablePlus) with: host `localhost`, port `5432`, user `giftgenius`, password `giftgenius`, database `giftgenius`.
 
-### Seed the catalog
+### Optional: seed or backfill the catalog
 
-Run once (or whenever you add new products). Choose one:
+Refill fetches live from the API during normal use. To pre-populate the catalog (e.g. for ingest scripts or testing), use:
 
 | Command | What it does |
 |--------|----------------|
 | `npm run ingest` | 10 sample products (no API keys) |
-| `npm run ingest:canopy` | Canopy API: many searches, broad catalog (needs `CANOPY_API_KEY`) |
-| `npm run ingest:canopy-product` | Canopy API: 1 search + 1 call per item, tags from API categories (fewer items, better tags) |
-| `npm run ingest -- --amazon` | Amazon Creators API (needs eligibility + `AMAZON_*` env) |
+| `npm run ingest:canopy` | Canopy API: many searches (needs `CANOPY_API_KEY`) |
+| `npm run ingest:canopy-product` | Canopy API: 1 search + 1 call per item, better tags |
+| `npm run ingest -- --amazon` | Amazon Creators API (needs `AMAZON_*` env) |
 
-Example with limits: `npm run ingest -- --canopy --max-calls 10` or `npm run ingest -- --canopy-product --max-calls 20`.
+Example with limits: `npm run ingest -- --canopy --max-calls 10`.
 
-### Run the app
+### Testing
 
 ```bash
-npm start
+npm test
 ```
 
-You’ll be prompted with products one at a time. Use the arrow keys and Enter to choose **Like**, **Pass**, or **Save**. Press Ctrl+C to exit.
+*(Test suite is placeholder; add unit tests for ranking and refill, and integration tests for feed creation, interactions, and queue refill.)*
+
+To sanity-check locally: run `npm start`, create a user and feed with interests (e.g. `coffee, books`), ensure at least one API key is set, and confirm products appear and Like/Pass/Save are recorded. Check `queue_items` and `interactions` in the DB after a short run.
+
+To see what items the app fetches and shows while testing, set `LOG_REFILL=1` (or `DEBUG=refill`) so refill and queue log to the console as well as to `queue.log`:
+
+```bash
+LOG_REFILL=1 npm start
+```
+
+You’ll see: search terms used, raw API results per term (source_id, title snippet, price_cents), which items were added to the queue, and each item as it’s shown. Without the env var, the same details are still written to `queue.log` only.
 
 ---
 
@@ -251,21 +291,19 @@ No ML; fully explainable and testable.
 
 ## Configuration & Tuning
 
-### Refill threshold
+### Refill threshold and queue size
 
 In `classes/queue.js`:
 
 ```javascript
-const REFILL_THRESHOLD = 5;  // Start refill when ≤ 5 items left
+const REFILL_THRESHOLD = 3;  // Start background refill when ≤ 3 items left
 ```
-
-### Batch size
 
 In `services/refill.js`:
 
 ```javascript
-const REFILL_BATCH_SIZE = 5;    // Items per refill
-const CANDIDATE_POOL_SIZE = 200; // Max candidates to rank
+const REFILL_TARGET_SIZE = 6;   // Target queue size; refill adds up to this many
+const API_ITEM_COUNT = 10;      // Items requested per API search
 ```
 
 ### Ranking weights
@@ -325,15 +363,15 @@ Both paths map API responses to the catalog schema and call `upsertProduct()` fr
 
 | Command | Description |
 |--------|-------------|
-| `npm start` | Run the GiftGenius CLI |
-| `npm run ingest` | Seed catalog with sample products |
-| `npm run ingest:canopy` | Ingest from Canopy API (search; many items) |
-| `npm run ingest:canopy-product` | Ingest from Canopy API (product per item; better tags) |
-| `npm run ingest -- --amazon` | Ingest from Amazon Creators API (when eligible) |
+| `npm start` | Run the GiftGenius CLI (user/feed selection, then queue; needs Amazon or Canopy env) |
+| `npm run db:migrate` | Apply PostgreSQL schema (run once after clone; run again after schema changes) |
+| `npm test` | Run tests *(placeholder — add tests for ranking, refill, queue)* |
+| `npm run ingest` | Optional: seed catalog with sample products |
+| `npm run ingest:canopy` | Optional: ingest from Canopy API (search) |
+| `npm run ingest:canopy-product` | Optional: ingest from Canopy API (product per item; better tags) |
+| `npm run ingest -- --amazon` | Optional: ingest from Amazon Creators API |
 | `npm run list-catalog [N]` | Print N most recent catalog items and their tags |
 | `npm run update-affiliate-links` | Add `AMAZON_PARTNER_TAG` to existing catalog `buy_url`s |
-| `npm run db:migrate` | Apply PostgreSQL schema (run once) |
-| `npm test` | *(placeholder)* |
 
 ### Environment
 

@@ -119,6 +119,33 @@ export async function getTagWeights(feedId) {
   }
 }
 
+const TOP_TAGS_LIMIT = 5;
+
+/**
+ * Search terms for refill: initial load uses explicit interests; subsequent uses top tag weights.
+ * @param {number} feedId
+ * @param {boolean} isInitial - true when queue was empty (first refill for this feed session)
+ * @returns {Promise<string[]>} search terms for API (e.g. ["coffee", "hiking"])
+ */
+export async function getSearchTermsForRefill(feedId, isInitial) {
+  const feed = await getFeed(feedId);
+  if (!feed) return [];
+
+  if (isInitial) {
+    const interests = feed.interests || [];
+    return Array.isArray(interests) ? interests : [];
+  }
+
+  const weights = feed.tag_weights || {};
+  const entries = Object.entries(weights)
+    .filter(([, w]) => typeof w === "number" && w > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, TOP_TAGS_LIMIT);
+  if (entries.length > 0) return entries.map(([tag]) => tag);
+  const interests = feed.interests || [];
+  return Array.isArray(interests) ? interests : [];
+}
+
 function parseFeedRow(row) {
   if (!row) return null;
   try {

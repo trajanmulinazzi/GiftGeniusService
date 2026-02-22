@@ -123,7 +123,7 @@ async function promptFeed(userId) {
       userId,
       name,
       relationship: relationship || null,
-      interests: interests.length ? interests : ["gift"],
+      interests: interests.length > 0 ? interests : ["gift"],
       budgetMin: budgetMin ? Number(budgetMin) : null,
       budgetMax: budgetMax ? Number(budgetMax) : null,
       occasion: null,
@@ -143,6 +143,6 @@ async function promptFeed(userId) {
   const feedId = await promptFeed(userId);
 
   const queue = new Queue(feedId);
-  const initItems = await refillQueue(feedId);
-  queue.add(initItems);
+  await refillQueue(feedId);
+  await queue.processQueue();
 })();

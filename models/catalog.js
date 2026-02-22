@@ -20,7 +20,7 @@ export async function upsertProduct(product) {
   const currency = product.currency ?? "USD";
   const tagsJson = typeof tags === "string" ? tags : JSON.stringify(tags || []);
 
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO catalog (source_id, source, title, image_url, price_cents, currency, buy_url, tags, active, last_refreshed)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
      ON CONFLICT(source, source_id) DO UPDATE SET
@@ -31,7 +31,8 @@ export async function upsertProduct(product) {
        buy_url = excluded.buy_url,
        tags = excluded.tags,
        active = excluded.active,
-       last_refreshed = now()`,
+       last_refreshed = now()
+     RETURNING id`,
     [
       source_id,
       source || "unknown",
@@ -45,6 +46,7 @@ export async function upsertProduct(product) {
     ]
   );
   persistDb();
+  return result.rows[0]?.id ?? null;
 }
 
 /**
