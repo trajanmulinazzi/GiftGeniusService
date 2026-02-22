@@ -7,12 +7,12 @@ This app acts like a personalized gift discovery tool. Instead of searching endl
 
 ## Vision
 
-GiftGenius Engine is a **catalog-driven gift recommendation system** that:
+GiftGenius Engine is a **gift recommendation system** that:
 
 - Uses **real, purchasable products** from a shared inventory instead of LLM-generated ideas.
 - **Learns from feedback** (like / pass / save) via tag weights and explicit interests—no ML training, fully deterministic and explainable.
 - Stays **monetizable** by driving traffic to affiliate links (e.g. Amazon Associates) via `buy_url` and partner tags.
-- Runs as a **CLI first**, with a smooth queue that refills in the background so the user never waits.
+- Currently runs as a **CLI first**, in the end this will serve as the backend for a frontend that displays each item.
 
 The goal is to give gift-givers a focused, fast way to browse and save ideas for specific people (Mom, Partner, Coworker) with a budget and interests in mind, while the system gets better at showing relevant items over time.
 

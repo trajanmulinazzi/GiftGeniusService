@@ -49,6 +49,8 @@ The user experience stays the same: swipe-style feedback on product suggestions,
 
 ## Architecture
 
+For full vision, data flow, and file map see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         CLI / Frontend                           │
@@ -130,13 +132,16 @@ Or use a GUI (pgAdmin, DBeaver, TablePlus) with: host `localhost`, port `5432`, 
 
 ### Seed the catalog
 
-Run once (or whenever you add new products):
+Run once (or whenever you add new products). Choose one:
 
-```bash
-npm run ingest
-```
+| Command | What it does |
+|--------|----------------|
+| `npm run ingest` | 10 sample products (no API keys) |
+| `npm run ingest:canopy` | Canopy API: many searches, broad catalog (needs `CANOPY_API_KEY`) |
+| `npm run ingest:canopy-product` | Canopy API: 1 search + 1 call per item, tags from API categories (fewer items, better tags) |
+| `npm run ingest -- --amazon` | Amazon Creators API (needs eligibility + `AMAZON_*` env) |
 
-This adds 10 sample products to the database.
+Example with limits: `npm run ingest -- --canopy --max-calls 10` or `npm run ingest -- --canopy-product --max-calls 20`.
 
 ### Run the app
 
@@ -152,30 +157,41 @@ You’ll be prompted with products one at a time. Use the arrow keys and Enter t
 
 ```
 giftgenius-engine/
-├── index.js              # Entry point: creates feed, runs queue
+├── index.js              # Entry point: user/feed prompts, runs queue
 ├── package.json
 ├── docker-compose.yml    # Postgres container
 ├── queue.log             # Runtime log (created on first run)
+├── ARCHITECTURE.md       # Vision, what's built, how it works
+├── .cursorrules          # Project rules for AI-assisted editing
 │
 ├── db/
-│   ├── index.js          # Database init, persistence
-│   └── schema.js         # Table definitions
+│   ├── index.js          # Database pool, init
+│   ├── schema.js         # Table definitions (legacy)
+│   └── schema.pg.sql     # PostgreSQL schema (source of truth)
 │
 ├── models/
 │   ├── catalog.js        # Product CRUD, getActiveProducts
 │   ├── feed.js           # Feed CRUD, tag weights
-│   └── interaction.js    # Record & query interactions
+│   ├── interaction.js   # Record & query interactions
+│   └── user.js           # User CRUD
 │
 ├── services/
 │   ├── ranking.js        # Tag weights, scoring
-│   └── refill.js         # Candidate fetch, rank, enqueue
+│   ├── refill.js         # Candidate fetch, rank, enqueue
+│   ├── canopy-api.js     # Canopy API (search + product by ASIN)
+│   └── amazon-api.js     # Amazon Creators API (search/get items)
 │
 ├── classes/
 │   ├── queue.js          # Queue loop, UI prompts
 │   └── user.js           # (Legacy, unused)
 │
+├── data/
+│   └── gift-keywords.js  # Curated keywords for Canopy ingest
+│
 └── scripts/
-    └── ingest-catalog.js # Catalog seed / refresh
+    ├── ingest-catalog.js # Catalog seed: sample, Canopy, Amazon
+    ├── list-catalog.js   # Print recent catalog items and tags
+    └── update-affiliate-links.js # Add partner tag to existing buy_urls
 ```
 
 ---
@@ -287,20 +303,17 @@ Then run `npm run ingest`.
 
 ### Connect real retailer APIs
 
-Implement a separate ingestion script that:
+**Canopy API** (implemented): Set `CANOPY_API_KEY` in `.env.local`. Use `npm run ingest:canopy` (many items, derived tags) or `npm run ingest:canopy-product` (fewer items, tags from API categories). Free tier: 100 requests/month.
 
-1. Fetches products from Amazon Product Advertising API, Etsy API, etc.
-2. Maps responses to the catalog schema
-3. Calls `upsertProduct()` from `models/catalog.js`
-4. Runs on a schedule (cron, worker) to keep prices and availability fresh
+**Amazon Creators API** (implemented): Set `AMAZON_CREDENTIAL_ID`, `AMAZON_CREDENTIAL_SECRET`, `AMAZON_PARTNER_TAG` in `.env.local`. Use `npm run ingest -- --amazon` when your Associates account meets eligibility (e.g. 10 qualifying sales in 30 days). Requires the `@amzn/creatorsapi-nodejs-sdk` (see repo or local path in package.json).
 
-The recommendation engine always reads from the local catalog; it never calls retailer APIs during the swipe loop.
+Both paths map API responses to the catalog schema and call `upsertProduct()` from `models/catalog.js`. The recommendation engine always reads from the local catalog; it never calls retailer APIs during the swipe loop.
 
 ---
 
 ## Future Work
 
-- [ ] **User model**: Link multiple feeds to a user account
+- [x] **User model**: Link multiple feeds to a user account *(done)*
 - [ ] **Web API**: Express/Fastify layer for web/mobile clients
 - [ ] **Duplicate detection**: Penalize near-duplicates and overused tags
 - [ ] **Catalog refresh job**: Update prices, availability, images on a schedule
@@ -310,18 +323,25 @@ The recommendation engine always reads from the local catalog; it never calls re
 
 ## Scripts
 
-| Command           | Description                          |
-|-------------------|--------------------------------------|
-| `npm start`       | Run the GiftGenius CLI               |
-| `npm run ingest`  | Seed or refresh the product catalog  |
-| `npm run db:migrate` | Apply schema to Postgres (run once) |
-| `npm test`        | *(placeholder)*                      |
+| Command | Description |
+|--------|-------------|
+| `npm start` | Run the GiftGenius CLI |
+| `npm run ingest` | Seed catalog with sample products |
+| `npm run ingest:canopy` | Ingest from Canopy API (search; many items) |
+| `npm run ingest:canopy-product` | Ingest from Canopy API (product per item; better tags) |
+| `npm run ingest -- --amazon` | Ingest from Amazon Creators API (when eligible) |
+| `npm run list-catalog [N]` | Print N most recent catalog items and their tags |
+| `npm run update-affiliate-links` | Add `AMAZON_PARTNER_TAG` to existing catalog `buy_url`s |
+| `npm run db:migrate` | Apply PostgreSQL schema (run once) |
+| `npm test` | *(placeholder)* |
 
-### Database connection
+### Environment
 
-Copy `.env.example` to `.env.local` and adjust if needed. Defaults match docker-compose:
+Copy `.env.example` to `.env.local` and set as needed.
 
-- Host: localhost, Port: 5432, User: giftgenius, Password: giftgenius, DB: giftgenius
+- **Database**: Defaults match docker-compose (localhost:5432, user `giftgenius`, database `giftgenius`). Use `DATABASE_URL` or `PGHOST`/`PGUSER`/etc.
+- **Canopy API**: `CANOPY_API_KEY` (for ingest:canopy and ingest:canopy-product).
+- **Amazon**: `AMAZON_CREDENTIAL_ID`, `AMAZON_CREDENTIAL_SECRET`, `AMAZON_PARTNER_TAG` (and optional `AMAZON_CREDENTIAL_VERSION`, `AMAZON_MARKETPLACE`). Partner tag is also used for affiliate links on Canopy-ingested items.
 
 ---
 
