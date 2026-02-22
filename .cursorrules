@@ -1,0 +1,116 @@
+You are an expert in Node.js backend development for mobile apps, specializing in TypeScript, REST APIs, PostgreSQL, and scalable backend architecture for Expo (React Native) clients.
+
+Backend Goals (for this Expo app)
+- Build a fast, reliable API that serves a swipe-based gift discovery app.
+- The mobile app never calls Amazon directly. All external data calls happen server-side via ingestion/refresh jobs.
+- The API should be designed for multiple users and concurrent requests from iOS/Android/web.
+
+Core Architecture
+- Use a shared Catalog (inventory) + per-user/per-feed personalization:
+  - catalog_items: shared product inventory (Amazon items)
+  - feeds: one per recipient/person per user (e.g., “Mom”, “Partner”)
+  - interactions: records seen/like/pass/save per feed and item
+- The “recommendation” endpoint selects from the catalog, never generates items with an LLM.
+- Never block a swipe on an Amazon API call. Use cached catalog data and refresh asynchronously.
+
+Tech Stack (recommended defaults)
+- Node.js + TypeScript
+- Fastify (or Express if already in use, but prefer Fastify for performance)
+- PostgreSQL as the system of record
+- Prisma for schema + migrations + type-safe queries
+- Redis + BullMQ for background jobs (ingest/refresh) if/when needed
+- Zod for request validation
+
+Code Style and Structure
+- Write clean, readable TypeScript. Prefer explicit types for public interfaces and service boundaries.
+- Structure by feature, not by file type:
+  - src/modules/catalog
+  - src/modules/feeds
+  - src/modules/interactions
+  - src/modules/recommendations
+  - src/modules/auth (optional later)
+- Keep business logic out of route handlers:
+  - routes should validate input and call services
+  - services implement logic and call repositories
+  - repositories contain all DB access
+
+Naming Conventions
+- Use camelCase for variables/functions and PascalCase for types/classes.
+- Use lowercase, hyphenated names for directories if needed, but prefer module folders by domain.
+- Database table names: snake_case (catalog_items, feed_interactions).
+- API endpoints: lowercase and RESTful:
+  - GET /feeds
+  - POST /feeds
+  - GET /feeds/:feedId/next
+  - POST /feeds/:feedId/interactions
+  - GET /feeds/:feedId/saved
+  - GET /catalog/items/:id (optional)
+
+Database Best Practices (Postgres)
+- Store money as integer cents (price_cents INT) + currency.
+- Deduplicate with composite uniqueness:
+  - UNIQUE(source, source_id) for catalog items.
+- Index for common queries:
+  - catalog_items(active, price_cents)
+  - interactions(feed_id, preference) or (feed_id, updated_at)
+- Avoid JSON strings for arrays. In Postgres, use text[] or jsonb where appropriate:
+  - tags: text[]
+  - interests: text[]
+- Use migrations for every schema change. Never hand-edit production DB schema.
+
+Interaction Model (important)
+- Track “seen” separately from “preference” (like/pass) and “saved”.
+- Do not overwrite history in a way that loses meaning.
+- Recommended MVP interaction record per (feed, item):
+  - seen_at timestamp
+  - preference enum (LIKE | PASS | NULL)
+  - saved_at timestamp
+  - updated_at timestamp
+
+Recommendation Logic (MVP and deterministic)
+- Implement deterministic ranking (no LLM):
+  - filter by hard constraints (active, budget range, exclusions)
+  - exclude already-seen items
+  - score candidates using tag weights derived from feed interactions
+  - apply diversity rules (avoid near-duplicates and repeated tags)
+- Return small batches (e.g., 5–10 items) optimized for swipe UI.
+- Make “get next batch” safe under concurrency:
+  - avoid returning duplicates across rapid repeated calls
+  - consider marking returned items as seen/queued in a transaction (or idempotency keys)
+
+API Best Practices
+- Validate all incoming payloads with Zod.
+- Always return consistent shapes and error responses.
+- Never expose secrets to the client.
+- Add rate limiting (especially for endpoints that drive ingestion/refresh).
+- Log request IDs and errors; don’t log sensitive data.
+
+External Provider (Amazon) Best Practices
+- Do not call Amazon per swipe. Only call Amazon in background ingestion/refresh jobs.
+- Store ASIN/sourceId and generate affiliate buy URLs server-side using a single function.
+- Refresh popular/recently shown items more frequently than long-tail items.
+- Implement backoff/retry for throttling and network failures.
+
+Security and Secrets
+- Store all secrets in environment variables:
+  - DATABASE_URL
+  - AMAZON_TAG (affiliate tag)
+  - provider API keys (if using a paid Amazon data API)
+- Never commit secrets.
+- Prepare for auth (JWT or session) but keep MVP simple if needed.
+
+Testing and Reliability
+- Unit test the ranking/scoring function and database filters.
+- Add integration tests for core endpoints:
+  - create feed
+  - record interaction
+  - fetch next batch
+- Prefer idempotent writes where possible.
+
+Expo Client Compatibility Notes
+- Optimize API responses for mobile:
+  - small payloads
+  - include primary image URL
+  - include a stable item id
+  - include buyUrl generated with affiliate tag
+- Support deep linking and shareable URLs later, but keep core API stable now.

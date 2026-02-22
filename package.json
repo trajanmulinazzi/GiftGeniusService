@@ -11,6 +11,10 @@
     "start": "node index.js",
     "ingest": "node scripts/ingest-catalog.js",
     "ingest:amazon": "node scripts/ingest-catalog.js --amazon",
+    "ingest:canopy": "node scripts/ingest-catalog.js --canopy",
+    "ingest:canopy-product": "node scripts/ingest-catalog.js --canopy-product",
+    "update-affiliate-links": "node scripts/update-affiliate-links.js",
+    "list-catalog": "node scripts/list-catalog.js",
     "db:migrate": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {

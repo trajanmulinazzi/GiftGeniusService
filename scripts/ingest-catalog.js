@@ -5,15 +5,21 @@
  * Run separately from the recommendation loop.
  *
  * Usage:
- *   npm run ingest              - Ingest sample products
- *   npm run ingest -- --amazon  - Search Amazon and ingest (uses AMAZON_* env)
+ *   npm run ingest               - Ingest sample products
+ *   npm run ingest:canopy        - Canopy API: 100 searches, broad catalog (uses CANOPY_API_KEY)
+ *   npm run ingest -- --canopy   - Same as above
+ *   npm run ingest:canopy-product - Canopy: 1 search + product API per item = well-tagged (1 call per item)
+ *   npm run ingest -- --canopy-product --max-calls 20 - Same, limit to 20 API calls (1 search + 19 products)
+ *   npm run ingest -- --amazon   - Amazon Creators API (requires 10 sales/30d eligibility)
  *   npm run ingest -- --amazon --keywords "gift for dad" --count 20
  */
 
 import "dotenv/config";
 import { upsertProduct } from "../models/catalog.js";
 import { getDb } from "../db/index.js";
-import { searchProducts } from "../services/amazon-api.js";
+import { searchProducts as amazonSearch } from "../services/amazon-api.js";
+import { searchProducts as canopySearch, getProductByAsin } from "../services/canopy-api.js";
+import { GIFT_KEYWORDS } from "../data/gift-keywords.js";
 
 const SAMPLE_PRODUCTS = [
   {
@@ -120,11 +126,21 @@ const SAMPLE_PRODUCTS = [
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { amazon: false, keywords: "gift ideas", count: 10 };
+  const opts = {
+    amazon: false,
+    canopy: false,
+    canopyProduct: false,
+    keywords: "gift ideas",
+    count: 10,
+    maxCalls: 100,
+  };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--amazon") opts.amazon = true;
+    if (args[i] === "--canopy") opts.canopy = true;
+    if (args[i] === "--canopy-product") opts.canopyProduct = true;
     if (args[i] === "--keywords" && args[i + 1]) opts.keywords = args[++i];
     if (args[i] === "--count" && args[i + 1]) opts.count = parseInt(args[++i], 10) || 10;
+    if (args[i] === "--max-calls" && args[i + 1]) opts.maxCalls = parseInt(args[++i], 10) || 100;
   }
   return opts;
 }
@@ -135,22 +151,85 @@ async function run() {
   await getDb();
 
   let products;
-  if (opts.amazon) {
-    console.log(`Searching Amazon for "${opts.keywords}" (${opts.count} items)...`);
-    products = await searchProducts(opts.keywords, {
+  if (opts.canopy) {
+    const keywords = GIFT_KEYWORDS.slice(0, opts.maxCalls);
+    console.log(
+      `Searching Canopy API (${keywords.length} queries, ~40 products each)...`
+    );
+    products = [];
+    const seen = new Set();
+    for (let i = 0; i < keywords.length; i++) {
+      process.stdout.write(
+        `  [${i + 1}/${keywords.length}] "${keywords[i]}"... `
+      );
+      try {
+        const batch = await canopySearch(keywords[i], { limit: 40 });
+        let newCount = 0;
+        for (const p of batch) {
+          if (seen.has(p.source_id)) continue;
+          seen.add(p.source_id);
+          products.push(p);
+          newCount++;
+        }
+        console.log(`${batch.length} results (${newCount} new)`);
+      } catch (err) {
+        console.log(`error: ${err.message}`);
+      }
+      if (i < keywords.length - 1) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    if (!products.length) {
+      console.warn("No products from Canopy. Check CANOPY_API_KEY and try again.");
+      process.exit(0);
+    }
+  } else if (opts.canopyProduct) {
+    const keyword = opts.keywords;
+    const maxCalls = Math.max(2, opts.maxCalls);
+    const productCalls = maxCalls - 1;
+    console.log(`Canopy product mode: 1 search + up to ${productCalls} product lookups (tags from API)...`);
+    const searchResults = await canopySearch(keyword, { limit: Math.min(40, productCalls) });
+    const asins = [...new Set(searchResults.map((p) => p.source_id))].slice(0, productCalls);
+    console.log(`  Search "${keyword}" → ${asins.length} ASINs. Fetching each (1 API call per item), saving as we go...`);
+    products = [];
+    for (let i = 0; i < asins.length; i++) {
+      process.stdout.write(`  [${i + 1}/${asins.length}] ${asins[i]}... `);
+      try {
+        const p = await getProductByAsin(asins[i]);
+        if (p) {
+          products.push(p);
+          await upsertProduct(p);
+          console.log(`OK (${p.tags.length} tags), saved`);
+        } else console.log("no data");
+      } catch (err) {
+        console.log(`error: ${err.message}`);
+      }
+      if (i < asins.length - 1) await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!products.length) {
+      console.warn("No products from Canopy product API.");
+      process.exit(0);
+    }
+  } else if (opts.amazon) {
+    console.log(`Searching Amazon Creators API for "${opts.keywords}" (${opts.count} items)...`);
+    products = await amazonSearch(opts.keywords, {
       searchIndex: "All",
       itemCount: opts.count,
     });
     if (!products.length) {
-      console.warn("No products returned from Amazon. Check credentials and try different keywords.");
+      console.warn(
+        "No products returned from Amazon. Check credentials and eligibility (10 sales/30d)."
+      );
       process.exit(0);
     }
   } else {
     products = SAMPLE_PRODUCTS;
   }
 
-  for (const product of products) {
-    await upsertProduct(product);
+  if (!opts.canopyProduct) {
+    for (const product of products) {
+      await upsertProduct(product);
+    }
   }
   console.log(`Ingested ${products.length} products into catalog.`);
 }

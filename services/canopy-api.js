@@ -1,0 +1,269 @@
+/**
+ * Canopy API service wrapper
+ * Fetches Amazon product data via search for catalog ingestion.
+ * Uses REST API: https://rest.canopyapi.co/api/amazon/search
+ * Requires CANOPY_API_KEY in env.
+ *
+ * Free tier: 100 requests/month. Search returns up to 40 products per call.
+ */
+
+const CANOPY_BASE = "https://rest.canopyapi.co";
+
+/**
+ * @returns {{ apiKey: string }}
+ */
+function getConfig() {
+  const apiKey = process.env.CANOPY_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "Missing Canopy API key. Set CANOPY_API_KEY in .env or .env.local"
+    );
+  }
+  return { apiKey };
+}
+
+const STOPWORDS = new Set([
+  "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or",
+  "the", "to", "with", "under", "over", "into", "onto",
+]);
+
+/**
+ * Derive tags from search term (e.g. "gift for dad" -> ["gift-for-dad", "gift", "dad"]).
+ */
+function tagsFromSearchTerm(searchTerm) {
+  if (!searchTerm || typeof searchTerm !== "string") return [];
+  const slug = searchTerm
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "");
+  if (!slug) return [];
+  const words = searchTerm
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9]/g, ""))
+    .filter((w) => w.length >= 2 && !STOPWORDS.has(w));
+  const seen = new Set([slug]);
+  const out = [slug];
+  for (const w of words) {
+    if (!seen.has(w)) {
+      seen.add(w);
+      out.push(w);
+    }
+  }
+  return out;
+}
+
+/**
+ * Extract meaningful keywords from product title for tags.
+ */
+function tagsFromTitle(title) {
+  if (!title || typeof title !== "string") return [];
+  const words = title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+  const seen = new Set();
+  const out = [];
+  for (const w of words) {
+    if (!seen.has(w) && out.length < 5) {
+      seen.add(w);
+      out.push(w);
+    }
+  }
+  return out;
+}
+
+/**
+ * Add affiliate tag to Amazon URL for tracking.
+ */
+function withAffiliateTag(url, partnerTag) {
+  if (!partnerTag || !url) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}tag=${encodeURIComponent(partnerTag)}`;
+}
+
+/**
+ * Map Canopy search result item to catalog product shape.
+ * @param {object} item - Raw item from Canopy search
+ * @param {string} [partnerTag] - Amazon Associate tag for buy_url
+ * @param {string} [searchTerm] - Query used to find this product (for tagging)
+ */
+function itemToProduct(item, partnerTag, searchTerm) {
+  const asin = item.asin;
+  if (!asin) return null;
+
+  const title = item.title || "Untitled";
+  const imageUrl = item.mainImageUrl || null;
+  const priceObj = item.price;
+  const priceValue = priceObj?.value;
+  const priceCents =
+    priceValue != null ? Math.round(Number(priceValue) * 100) : null;
+  const currency = priceObj?.currency || "USD";
+
+  const rawUrl = item.url || `https://www.amazon.com/dp/${asin}`;
+  const buyUrl = withAffiliateTag(rawUrl, partnerTag);
+
+  const tags = [];
+  tags.push(...tagsFromSearchTerm(searchTerm));
+  tags.push(...tagsFromTitle(title));
+  if (item.isPrime) tags.push("prime");
+  if (item.rating != null) tags.push(`rating-${Math.round(item.rating)}`);
+  if (item.ratingsTotal != null && item.ratingsTotal > 0) {
+    tags.push(`${item.ratingsTotal}-reviews`);
+  }
+  const unique = [...new Set(tags)];
+
+  return {
+    source_id: asin,
+    source: "amazon",
+    title,
+    image_url: imageUrl,
+    price_cents: priceCents,
+    currency,
+    buy_url: buyUrl,
+    tags: unique,
+    active: true,
+  };
+}
+
+/**
+ * Search Amazon products via Canopy API.
+ * @param {string} searchTerm - Search keywords
+ * @param {object} [opts]
+ * @param {number} [opts.page] - Page number (default 1)
+ * @param {number} [opts.limit] - Results per page, 20-40 (default 40)
+ * @param {string} [opts.domain] - Marketplace (default US)
+ * @returns {Promise<object[]>} Catalog-ready products
+ */
+export async function searchProducts(searchTerm, opts = {}) {
+  const { apiKey } = getConfig();
+  const partnerTag = process.env.AMAZON_PARTNER_TAG;
+
+  const params = new URLSearchParams({
+    searchTerm,
+    domain: opts.domain || "US",
+    page: String(opts.page ?? 1),
+    limit: String(opts.limit ?? 40),
+  });
+
+  const url = `${CANOPY_BASE}/api/amazon/search?${params}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "API-KEY": apiKey,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let errMsg = `Canopy API error ${response.status}: ${response.statusText}`;
+    try {
+      const body = JSON.parse(text);
+      errMsg = body?.errors?.[0]?.message || body?.message || errMsg;
+    } catch (_) {}
+    throw new Error(errMsg);
+  }
+
+  const json = await response.json();
+  const results =
+    json?.data?.amazonProductSearchResults?.productResults?.results ?? [];
+  const products = [];
+  for (const item of results) {
+    const p = itemToProduct(item, partnerTag, searchTerm);
+    if (p) products.push(p);
+  }
+  return products;
+}
+
+/**
+ * Fetch a single product by ASIN (1 API call).
+ * Returns item with tags from API categories + featureBullets.
+ * @param {string} asin
+ * @param {object} [opts] - { domain }
+ * @returns {Promise<object|null>} Catalog-ready product or null
+ */
+export async function getProductByAsin(asin, opts = {}) {
+  const { apiKey } = getConfig();
+  const partnerTag = process.env.AMAZON_PARTNER_TAG;
+
+  const params = new URLSearchParams({
+    asin,
+    domain: opts.domain || "US",
+  });
+  const url = `${CANOPY_BASE}/api/amazon/product?${params}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "API-KEY": apiKey,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    const text = await response.text();
+    let errMsg = `Canopy API error ${response.status}: ${response.statusText}`;
+    try {
+      const body = JSON.parse(text);
+      errMsg = body?.errors?.[0]?.message || body?.message || errMsg;
+    } catch (_) {}
+    throw new Error(errMsg);
+  }
+
+  const json = await response.json();
+  const p = json?.data?.amazonProduct;
+  if (!p || !p.asin) return null;
+
+  const title = p.title || "Untitled";
+  const imageUrl = p.mainImageUrl || null;
+  const priceObj = p.price;
+  const priceValue = priceObj?.value;
+  const priceCents =
+    priceValue != null ? Math.round(Number(priceValue) * 100) : null;
+  const currency = priceObj?.currency || "USD";
+  const rawUrl = p.url || `https://www.amazon.com/dp/${p.asin}`;
+  const buyUrl = withAffiliateTag(rawUrl, partnerTag);
+
+  const tags = [];
+  if (p.categories && Array.isArray(p.categories)) {
+    for (const cat of p.categories) {
+      const path = cat.breadcrumbPath || cat.name || "";
+      const parts = path.split(/\s*>\s*/).map((s) => s.trim()).filter(Boolean);
+      for (const part of parts) {
+        const slug = part.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        if (slug && slug.length >= 2 && !STOPWORDS.has(slug)) tags.push(slug);
+      }
+      if (cat.name) {
+        const slug = cat.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        if (slug && !tags.includes(slug)) tags.push(slug);
+      }
+    }
+  }
+  if (p.featureBullets && Array.isArray(p.featureBullets)) {
+    for (const bullet of p.featureBullets.slice(0, 3)) {
+      const w = String(bullet).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).find((x) => x.length >= 4 && !STOPWORDS.has(x));
+      if (w) tags.push(w);
+    }
+  }
+  if (p.brand) tags.push(p.brand.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
+  if (p.isPrime) tags.push("prime");
+  if (p.rating != null) tags.push(`rating-${Math.round(p.rating)}`);
+  if (p.ratingsTotal != null && p.ratingsTotal > 0) tags.push(`${p.ratingsTotal}-reviews`);
+
+  const unique = [...new Set(tags)];
+
+  return {
+    source_id: p.asin,
+    source: "amazon",
+    title,
+    image_url: imageUrl,
+    price_cents: priceCents,
+    currency,
+    buy_url: buyUrl,
+    tags: unique,
+    active: true,
+  };
+}
