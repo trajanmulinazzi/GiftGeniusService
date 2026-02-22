@@ -155,6 +155,25 @@ function itemToProduct(item, partnerTag) {
 }
 
 /**
+ * Call SearchItems once and return the raw API response (for debugging).
+ * @param {string} keywords
+ * @param {object} [opts] - itemCount, searchIndex
+ * @returns {Promise<object>} Raw response from api.searchItems()
+ */
+export async function searchItemsRaw(keywords, opts = {}) {
+  const { api, marketplace } = getApi();
+  const req = new SearchItemsRequestContent();
+  req.partnerTag = process.env.AMAZON_PARTNER_TAG;
+  req.keywords = keywords;
+  req.searchIndex = opts.searchIndex || "All";
+  req.itemCount = opts.itemCount ?? 5;
+  req.resources = SEARCH_RESOURCES;
+  return await api.searchItems(marketplace, {
+    searchItemsRequestContent: req,
+  });
+}
+
+/**
  * Search Amazon products by keywords.
  * @param {string} keywords
  * @param {object} opts
