@@ -15,7 +15,9 @@
     "ingest:canopy-product": "node scripts/ingest-catalog.js --canopy-product",
     "update-affiliate-links": "node scripts/update-affiliate-links.js",
     "list-catalog": "node scripts/list-catalog.js",
+    "list-queue": "node scripts/list-queue.js",
     "amazon:response": "node scripts/amazon-api-response.js",
+    "canopy:response": "node scripts/canopy-api-response.js",
     "db:migrate": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {

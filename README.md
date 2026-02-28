@@ -389,6 +389,7 @@ Both paths map API responses to the catalog schema and call `upsertProduct()` fr
 | `npm run ingest -- --amazon` | Optional: ingest from Amazon Creators API |
 | `npm run list-catalog [N]` | Print N most recent catalog items and their tags |
 | `npm run amazon:response [keywords]` | Call Amazon SearchItems once and print raw API response (default keyword: `hiking`) |
+| `npm run canopy:response [ASIN]` | Call Canopy product API once for one item; print full raw response (tags: categories, featureBullets, brand). Default ASIN: `B09TR9LPKN` |
 | `npm run update-affiliate-links` | Add `AMAZON_PARTNER_TAG` to existing catalog `buy_url`s |
 
 ### Environment

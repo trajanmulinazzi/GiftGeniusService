@@ -132,6 +132,38 @@ function itemToProduct(item, partnerTag, searchTerm) {
 }
 
 /**
+ * Call Canopy search API and return the raw JSON response (for debugging).
+ * @param {string} searchTerm - Search keywords
+ * @param {object} [opts] - page, limit, domain
+ * @returns {Promise<object>} Full response body from the API
+ */
+export async function searchProductsRaw(searchTerm, opts = {}) {
+  const { apiKey } = getConfig();
+  const params = new URLSearchParams({
+    searchTerm,
+    domain: opts.domain || "US",
+    page: String(opts.page ?? 1),
+    limit: String(opts.limit ?? 40),
+  });
+  const url = `${CANOPY_BASE}/api/amazon/search?${params}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "API-KEY": apiKey,
+      "Content-Type": "application/json",
+    },
+  });
+  const json = await response.json();
+  if (!response.ok) {
+    const err = new Error(json?.errors?.[0]?.message || json?.message || `Canopy API ${response.status}`);
+    err.status = response.status;
+    err.body = json;
+    throw err;
+  }
+  return json;
+}
+
+/**
  * Search Amazon products via Canopy API.
  * @param {string} searchTerm - Search keywords
  * @param {object} [opts]
@@ -183,6 +215,38 @@ export async function searchProducts(searchTerm, opts = {}) {
 
 /**
  * Fetch a single product by ASIN (1 API call).
+/**
+ * Call Canopy product-by-ASIN API once and return the full raw JSON response (for debugging / inspecting tags).
+ * One API call, one item, full response including categories, featureBullets, brand, etc.
+ * @param {string} asin - Amazon ASIN
+ * @param {object} [opts] - { domain }
+ * @returns {Promise<object>} Full response body from the API
+ */
+export async function getProductByAsinRaw(asin, opts = {}) {
+  const { apiKey } = getConfig();
+  const params = new URLSearchParams({
+    asin,
+    domain: opts.domain || "US",
+  });
+  const url = `${CANOPY_BASE}/api/amazon/product?${params}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "API-KEY": apiKey,
+      "Content-Type": "application/json",
+    },
+  });
+  const json = await response.json();
+  if (!response.ok) {
+    const err = new Error(json?.errors?.[0]?.message || json?.message || `Canopy API ${response.status}`);
+    err.status = response.status;
+    err.body = json;
+    throw err;
+  }
+  return json;
+}
+
+/**
  * Returns item with tags from API categories + featureBullets.
  * @param {string} asin
  * @param {object} [opts] - { domain }
