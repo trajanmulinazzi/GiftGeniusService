@@ -18,6 +18,7 @@
     "list-queue": "node scripts/list-queue.js",
     "amazon:response": "node scripts/amazon-api-response.js",
     "canopy:response": "node scripts/canopy-api-response.js",
+    "canopy:search-to-catalog": "node scripts/canopy-search-to-catalog.js",
     "db:migrate": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {
