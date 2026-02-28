@@ -124,16 +124,15 @@ function itemToProduct(item, partnerTag, searchTerm) {
   const rawUrl = item.url || `https://www.amazon.com/dp/${asin}`;
   const buyUrl = withAffiliateTag(rawUrl, partnerTag);
 
-  // Derived tags: search API doesn't include categories per item
+  // Derived tags: search API doesn't include categories per item (rating/reviews stored as columns, not tags)
   const tags = [];
   tags.push(...tagsFromSearchTerm(searchTerm));
   tags.push(...tagsFromTitle(title));
   if (item.isPrime) tags.push("prime");
-  if (item.rating != null) tags.push(`rating-${Math.round(item.rating)}`);
-  if (item.ratingsTotal != null && item.ratingsTotal > 0) {
-    tags.push(`${item.ratingsTotal}-reviews`);
-  }
   const unique = [...new Set(tags)];
+
+  const rating = item.rating != null ? Number(item.rating) : null;
+  const reviewsCount = item.ratingsTotal != null && item.ratingsTotal > 0 ? Math.floor(Number(item.ratingsTotal)) : null;
 
   return {
     source_id: asin,
@@ -144,6 +143,8 @@ function itemToProduct(item, partnerTag, searchTerm) {
     currency,
     buy_url: buyUrl,
     tags: unique,
+    rating,
+    reviews_count: reviewsCount,
     active: true,
   };
 }
@@ -365,11 +366,10 @@ export async function getProductByAsin(asin, opts = {}) {
         .replace(/^-|-$/g, "")
     );
   if (p.isPrime) tags.push("prime");
-  if (p.rating != null) tags.push(`rating-${Math.round(p.rating)}`);
-  if (p.ratingsTotal != null && p.ratingsTotal > 0)
-    tags.push(`${p.ratingsTotal}-reviews`);
-
   const unique = [...new Set(tags)];
+
+  const rating = p.rating != null ? Number(p.rating) : null;
+  const reviewsCount = p.ratingsTotal != null && p.ratingsTotal > 0 ? Math.floor(Number(p.ratingsTotal)) : null;
 
   return {
     source_id: p.asin,
@@ -380,6 +380,8 @@ export async function getProductByAsin(asin, opts = {}) {
     currency,
     buy_url: buyUrl,
     tags: unique,
+    rating,
+    reviews_count: reviewsCount,
     active: true,
   };
 }

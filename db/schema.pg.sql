@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS catalog (
   currency TEXT DEFAULT 'USD',
   buy_url TEXT,
   tags TEXT NOT NULL DEFAULT '[]',
+  rating NUMERIC(3,2),
+  reviews_count INTEGER,
   active INTEGER NOT NULL DEFAULT 1,
   last_refreshed TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -27,6 +29,8 @@ CREATE TABLE IF NOT EXISTS catalog (
 ALTER TABLE catalog ADD COLUMN IF NOT EXISTS times_shown INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE catalog ADD COLUMN IF NOT EXISTS times_liked INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE catalog ADD COLUMN IF NOT EXISTS last_shown_at TIMESTAMPTZ;
+ALTER TABLE catalog ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2);
+ALTER TABLE catalog ADD COLUMN IF NOT EXISTS reviews_count INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_catalog_source ON catalog(source);
 CREATE INDEX IF NOT EXISTS idx_catalog_active ON catalog(active);

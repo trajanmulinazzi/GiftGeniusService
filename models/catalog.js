@@ -15,14 +15,14 @@ function toPriceCents(product) {
 
 export async function upsertProduct(product) {
   const pool = await getDb();
-  const { source_id, source, title, image_url, buy_url, tags, active } = product;
+  const { source_id, source, title, image_url, buy_url, tags, rating, reviews_count, active } = product;
   const priceCents = toPriceCents(product);
   const currency = product.currency ?? "USD";
   const tagsJson = typeof tags === "string" ? tags : JSON.stringify(tags || []);
 
   const result = await pool.query(
-    `INSERT INTO catalog (source_id, source, title, image_url, price_cents, currency, buy_url, tags, active, last_refreshed)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+    `INSERT INTO catalog (source_id, source, title, image_url, price_cents, currency, buy_url, tags, rating, reviews_count, active, last_refreshed)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
      ON CONFLICT(source, source_id) DO UPDATE SET
        title = excluded.title,
        image_url = excluded.image_url,
@@ -30,6 +30,8 @@ export async function upsertProduct(product) {
        currency = excluded.currency,
        buy_url = excluded.buy_url,
        tags = excluded.tags,
+       rating = excluded.rating,
+       reviews_count = excluded.reviews_count,
        active = excluded.active,
        last_refreshed = now()
      RETURNING id`,
@@ -42,6 +44,8 @@ export async function upsertProduct(product) {
       currency,
       buy_url || null,
       tagsJson,
+      rating != null ? Number(rating) : null,
+      reviews_count != null ? Math.floor(Number(reviews_count)) : null,
       active !== undefined ? (active ? 1 : 0) : 1,
     ]
   );
