@@ -33,16 +33,32 @@ async function logRefill(message, detail = null) {
 }
 
 /**
+ * Build budget options for API calls (min/max in cents, from feed dollars).
+ * @param {Object} feed - feed with budget_min, budget_max (dollars)
+ * @returns {{ budgetMinCents?: number, budgetMaxCents?: number }}
+ */
+function budgetOpts(feed) {
+  const opts = {};
+  if (feed.budget_min != null) opts.budgetMinCents = Math.round(feed.budget_min * 100);
+  if (feed.budget_max != null) opts.budgetMaxCents = Math.round(feed.budget_max * 100);
+  return opts;
+}
+
+/**
  * Fetch products from API: try Amazon first, fallback to Canopy.
+ * Uses feed's min/max budget when calling the API so results are pre-filtered by price.
  * @param {string} searchTerm
+ * @param {Object} feed - feed with budget_min, budget_max (dollars)
  * @returns {Promise<{ products: object[], source: 'amazon'|'canopy' }>}
  */
-async function fetchFromApi(searchTerm) {
+async function fetchFromApi(searchTerm, feed) {
+  const budget = budgetOpts(feed || {});
+  const apiOpts = { itemCount: API_ITEM_COUNT, ...budget };
   try {
-    const products = await amazonApi.searchProducts(searchTerm, { itemCount: API_ITEM_COUNT });
+    const products = await amazonApi.searchProducts(searchTerm, apiOpts);
     return { products, source: "amazon" };
   } catch (_) {
-    const products = await canopyApi.searchProducts(searchTerm, { limit: 20 });
+    const products = await canopyApi.searchProducts(searchTerm, { limit: 20, ...budget });
     return { products, source: "canopy" };
   }
 }
@@ -97,7 +113,7 @@ export async function refillQueue(feedId) {
   await logRefill(`feedId=${feedId} isInitial=${isInitial} searchTerms=`, searchTerms);
 
   for (const term of searchTerms) {
-    const { products, source } = await fetchFromApi(term);
+    const { products, source } = await fetchFromApi(term, feed);
     await logRefill(`term="${term}" ${source} API: ${products.length} items`, products.map((p) => ({ source_id: p.source_id, title: (p.title || "").slice(0, 60), price_cents: p.price_cents })));
     for (const p of products) {
       const key = `${p.source || "amazon"}:${p.source_id}`;

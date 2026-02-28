@@ -179,6 +179,8 @@ export async function searchItemsRaw(keywords, opts = {}) {
  * @param {object} opts
  * @param {string} [opts.searchIndex] - e.g. "All", "Books", "Electronics"
  * @param {number} [opts.itemCount] - default 10
+ * @param {number} [opts.budgetMinCents] - min price filter (Creators API minPrice: positive integer, lowest denomination e.g. cents; items with price above this)
+ * @param {number} [opts.budgetMaxCents] - max price filter (Creators API maxPrice: positive integer, lowest denomination e.g. cents; items with price below this)
  * @returns {Promise<object[]>} Catalog-ready products
  */
 export async function searchProducts(keywords, opts = {}) {
@@ -190,6 +192,10 @@ export async function searchProducts(keywords, opts = {}) {
   req.searchIndex = opts.searchIndex || "All";
   req.itemCount = opts.itemCount ?? 10;
   req.resources = SEARCH_RESOURCES;
+
+  // Creators API: minPrice/maxPrice are Positive Integers, lowest currency denomination (e.g. cents). e.g. 3241 = $31.41
+  if (opts.budgetMinCents != null && opts.budgetMinCents >= 1) req.minPrice = Math.floor(opts.budgetMinCents);
+  if (opts.budgetMaxCents != null && opts.budgetMaxCents >= 1) req.maxPrice = Math.floor(opts.budgetMaxCents);
 
   const response = await api.searchItems(marketplace, {
     searchItemsRequestContent: req,

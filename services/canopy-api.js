@@ -23,8 +23,25 @@ function getConfig() {
 }
 
 const STOPWORDS = new Set([
-  "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or",
-  "the", "to", "with", "under", "over", "into", "onto",
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "by",
+  "for",
+  "from",
+  "in",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+  "under",
+  "over",
+  "into",
+  "onto",
 ]);
 
 /**
@@ -155,7 +172,11 @@ export async function searchProductsRaw(searchTerm, opts = {}) {
   });
   const json = await response.json();
   if (!response.ok) {
-    const err = new Error(json?.errors?.[0]?.message || json?.message || `Canopy API ${response.status}`);
+    const err = new Error(
+      json?.errors?.[0]?.message ||
+        json?.message ||
+        `Canopy API ${response.status}`
+    );
     err.status = response.status;
     err.body = json;
     throw err;
@@ -170,6 +191,8 @@ export async function searchProductsRaw(searchTerm, opts = {}) {
  * @param {number} [opts.page] - Page number (default 1)
  * @param {number} [opts.limit] - Results per page, 20-40 (default 40)
  * @param {string} [opts.domain] - Marketplace (default US)
+ * @param {number} [opts.budgetMinCents] - Min price filter (cents)
+ * @param {number} [opts.budgetMaxCents] - Max price filter (cents)
  * @returns {Promise<object[]>} Catalog-ready products
  */
 export async function searchProducts(searchTerm, opts = {}) {
@@ -182,6 +205,8 @@ export async function searchProducts(searchTerm, opts = {}) {
     page: String(opts.page ?? 1),
     limit: String(opts.limit ?? 40),
   });
+  if (opts.budgetMinCents != null) params.set("minPrice", String(opts.budgetMinCents));
+  if (opts.budgetMaxCents != null) params.set("maxPrice", String(opts.budgetMaxCents));
 
   const url = `${CANOPY_BASE}/api/amazon/search?${params}`;
   const response = await fetch(url, {
@@ -238,7 +263,11 @@ export async function getProductByAsinRaw(asin, opts = {}) {
   });
   const json = await response.json();
   if (!response.ok) {
-    const err = new Error(json?.errors?.[0]?.message || json?.message || `Canopy API ${response.status}`);
+    const err = new Error(
+      json?.errors?.[0]?.message ||
+        json?.message ||
+        `Canopy API ${response.status}`
+    );
     err.status = response.status;
     err.body = json;
     throw err;
@@ -298,27 +327,47 @@ export async function getProductByAsin(asin, opts = {}) {
   if (p.categories && Array.isArray(p.categories)) {
     for (const cat of p.categories) {
       const path = cat.breadcrumbPath || cat.name || "";
-      const parts = path.split(/\s*>\s*/).map((s) => s.trim()).filter(Boolean);
+      const parts = path
+        .split(/\s*>\s*/)
+        .map((s) => s.trim())
+        .filter(Boolean);
       for (const part of parts) {
-        const slug = part.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        const slug = part
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
         if (slug && slug.length >= 2 && !STOPWORDS.has(slug)) tags.push(slug);
       }
       if (cat.name) {
-        const slug = cat.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        const slug = cat.name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
         if (slug && !tags.includes(slug)) tags.push(slug);
       }
     }
   }
   if (p.featureBullets && Array.isArray(p.featureBullets)) {
     for (const bullet of p.featureBullets.slice(0, 3)) {
-      const w = String(bullet).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).find((x) => x.length >= 4 && !STOPWORDS.has(x));
+      const w = String(bullet)
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .find((x) => x.length >= 4 && !STOPWORDS.has(x));
       if (w) tags.push(w);
     }
   }
-  if (p.brand) tags.push(p.brand.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
+  if (p.brand)
+    tags.push(
+      p.brand
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+    );
   if (p.isPrime) tags.push("prime");
   if (p.rating != null) tags.push(`rating-${Math.round(p.rating)}`);
-  if (p.ratingsTotal != null && p.ratingsTotal > 0) tags.push(`${p.ratingsTotal}-reviews`);
+  if (p.ratingsTotal != null && p.ratingsTotal > 0)
+    tags.push(`${p.ratingsTotal}-reviews`);
 
   const unique = [...new Set(tags)];
 
