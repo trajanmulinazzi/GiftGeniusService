@@ -16,12 +16,16 @@ import { rankItems } from "./ranking.js";
 const REFILL_TARGET_SIZE = 6;
 const REFILL_THRESHOLD = 3;
 const API_ITEM_COUNT = 10;
+/** Max items with the same tag in one refill batch (diversity cap). */
+const MAX_ITEMS_PER_TAG = 2;
 
 const QUEUE_LOG = join(process.cwd(), "queue.log");
-const LOG_TO_CONSOLE = process.env.LOG_REFILL === "1" || process.env.DEBUG === "refill";
+const LOG_TO_CONSOLE =
+  process.env.LOG_REFILL === "1" || process.env.DEBUG === "refill";
 
 async function logRefill(message, detail = null) {
-  const line = detail != null ? `${message} ${JSON.stringify(detail)}` : message;
+  const line =
+    detail != null ? `${message} ${JSON.stringify(detail)}` : message;
   const timestamp = new Date().toISOString();
   const logLine = `[${timestamp}] [refill] ${line}\n`;
   try {
@@ -39,8 +43,10 @@ async function logRefill(message, detail = null) {
  */
 function budgetOpts(feed) {
   const opts = {};
-  if (feed.budget_min != null) opts.budgetMinCents = Math.round(feed.budget_min * 100);
-  if (feed.budget_max != null) opts.budgetMaxCents = Math.round(feed.budget_max * 100);
+  if (feed.budget_min != null)
+    opts.budgetMinCents = Math.round(feed.budget_min * 100);
+  if (feed.budget_max != null)
+    opts.budgetMaxCents = Math.round(feed.budget_max * 100);
   return opts;
 }
 
@@ -58,7 +64,10 @@ async function fetchFromApi(searchTerm, feed) {
     const products = await amazonApi.searchProducts(searchTerm, apiOpts);
     return { products, source: "amazon" };
   } catch (_) {
-    const products = await canopyApi.searchProducts(searchTerm, { limit: 20, ...budget });
+    const products = await canopyApi.searchProducts(searchTerm, {
+      limit: 20,
+      ...budget,
+    });
     return { products, source: "canopy" };
   }
 }
@@ -92,6 +101,30 @@ function parseTags(tags) {
 }
 
 /**
+ * Select up to targetSize items from ranked list, capping how many items share the same tag.
+ * Preserves ranking order; skips an item only if adding it would exceed maxPerTag for any of its tags.
+ * @param {Object[]} rankedItems - items sorted by score (best first), each with .tags (string[])
+ * @param {{ targetSize: number, maxPerTag: number }} opts
+ * @returns {Object[]} subset of rankedItems with diversity cap applied
+ */
+function selectWithTagCap(rankedItems, { targetSize, maxPerTag }) {
+  const selected = [];
+  const tagCount = {};
+  for (const item of rankedItems) {
+    if (selected.length >= targetSize) break;
+    const tags = (item.tags && Array.isArray(item.tags) ? item.tags : []).map(
+      (t) => String(t).toLowerCase()
+    );
+    const wouldExceed =
+      tags.length > 0 && tags.some((tag) => (tagCount[tag] || 0) >= maxPerTag);
+    if (wouldExceed) continue;
+    selected.push(item);
+    for (const tag of tags) tagCount[tag] = (tagCount[tag] || 0) + 1;
+  }
+  return selected;
+}
+
+/**
  * Refill the persisted queue for a feed: call API with search terms (interests or top tags),
  * filter already-seen and budget, upsert to catalog, rank, append up to REFILL_TARGET_SIZE.
  * Only calls API again in same refill if queue would still be below REFILL_THRESHOLD after adding.
@@ -110,11 +143,21 @@ export async function refillQueue(feedId) {
   const seenSet = await getSeenSourceIds(feedId);
   const candidateIds = [];
 
-  await logRefill(`feedId=${feedId} isInitial=${isInitial} searchTerms=`, searchTerms);
+  await logRefill(
+    `feedId=${feedId} isInitial=${isInitial} searchTerms=`,
+    searchTerms
+  );
 
   for (const term of searchTerms) {
     const { products, source } = await fetchFromApi(term, feed);
-    await logRefill(`term="${term}" ${source} API: ${products.length} items`, products.map((p) => ({ source_id: p.source_id, title: (p.title || "").slice(0, 60), price_cents: p.price_cents })));
+    await logRefill(
+      `term="${term}" ${source} API: ${products.length} items`,
+      products.map((p) => ({
+        source_id: p.source_id,
+        title: (p.title || "").slice(0, 60),
+        price_cents: p.price_cents,
+      }))
+    );
     for (const p of products) {
       const key = `${p.source || "amazon"}:${p.source_id}`;
       if (seenSet.has(key)) continue;
@@ -127,7 +170,11 @@ export async function refillQueue(feedId) {
       }
     }
     if (candidateIds.length >= REFILL_TARGET_SIZE) break;
-    if (candidateIds.length >= REFILL_THRESHOLD && searchTerms.indexOf(term) === searchTerms.length - 1) break;
+    if (
+      candidateIds.length >= REFILL_THRESHOLD &&
+      searchTerms.indexOf(term) === searchTerms.length - 1
+    )
+      break;
   }
 
   if (candidateIds.length === 0) return 0;
@@ -138,10 +185,22 @@ export async function refillQueue(feedId) {
     tags: parseTags(p.tags),
   }));
   const ranked = rankItems(parsed, feed);
-  const toAdd = ranked.slice(0, REFILL_TARGET_SIZE).map((r) => r.id);
-  const addedRows = ranked.slice(0, REFILL_TARGET_SIZE);
+  const selected = selectWithTagCap(ranked, {
+    targetSize: REFILL_TARGET_SIZE,
+    maxPerTag: MAX_ITEMS_PER_TAG,
+  });
+  const toAdd = selected.map((r) => r.id);
+  const addedRows = selected;
 
-  await logRefill(`adding to queue: ${addedRows.length} items`, addedRows.map((r) => ({ id: r.id, source_id: r.source_id, title: (r.title || "").slice(0, 60), price_cents: r.price_cents })));
+  await logRefill(
+    `adding to queue: ${addedRows.length} items`,
+    addedRows.map((r) => ({
+      id: r.id,
+      source_id: r.source_id,
+      title: (r.title || "").slice(0, 60),
+      price_cents: r.price_cents,
+    }))
+  );
 
   await appendToQueue(feedId, toAdd);
   return toAdd.length;
