@@ -7,6 +7,8 @@
  * Free tier: 100 requests/month. Search returns up to 40 products per call.
  */
 
+import { normalizeTags } from "../data/tag-canonical.js";
+
 const CANOPY_BASE = "https://rest.canopyapi.co";
 
 /**
@@ -130,6 +132,7 @@ function itemToProduct(item, partnerTag, searchTerm) {
   tags.push(...tagsFromTitle(title));
   if (item.isPrime) tags.push("prime");
   const unique = [...new Set(tags)];
+  const canonical = normalizeTags(unique);
 
   const rating = item.rating != null ? Number(item.rating) : null;
   const reviewsCount = item.ratingsTotal != null && item.ratingsTotal > 0 ? Math.floor(Number(item.ratingsTotal)) : null;
@@ -142,7 +145,7 @@ function itemToProduct(item, partnerTag, searchTerm) {
     price_cents: priceCents,
     currency,
     buy_url: buyUrl,
-    tags: unique,
+    tags: canonical,
     rating,
     reviews_count: reviewsCount,
     active: true,
@@ -367,6 +370,7 @@ export async function getProductByAsin(asin, opts = {}) {
     );
   if (p.isPrime) tags.push("prime");
   const unique = [...new Set(tags)];
+  const canonical = normalizeTags(unique);
 
   const rating = p.rating != null ? Number(p.rating) : null;
   const reviewsCount = p.ratingsTotal != null && p.ratingsTotal > 0 ? Math.floor(Number(p.ratingsTotal)) : null;
@@ -379,7 +383,7 @@ export async function getProductByAsin(asin, opts = {}) {
     price_cents: priceCents,
     currency,
     buy_url: buyUrl,
-    tags: unique,
+    tags: canonical,
     rating,
     reviews_count: reviewsCount,
     active: true,

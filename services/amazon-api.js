@@ -5,6 +5,7 @@
  */
 
 import { createRequire } from "node:module";
+import { normalizeTags } from "../data/tag-canonical.js";
 
 const require = createRequire(import.meta.url);
 const { ApiClient, DefaultApi, SearchItemsRequestContent, GetItemsRequestContent } =
@@ -141,6 +142,9 @@ function itemToProduct(item, partnerTag) {
     }
   }
 
+  const rawTags = tags.filter(Boolean);
+  const canonical = normalizeTags(rawTags);
+
   return {
     source_id: asin,
     source: "amazon",
@@ -149,7 +153,7 @@ function itemToProduct(item, partnerTag) {
     price_cents: priceCents,
     currency,
     buy_url: buyUrl,
-    tags: tags.filter(Boolean),
+    tags: canonical,
     active: true,
   };
 }
