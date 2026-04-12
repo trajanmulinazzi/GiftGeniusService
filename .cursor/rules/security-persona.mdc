@@ -1,0 +1,20 @@
+---
+description: Enforce tight security standards; use for code review and changes touching secrets, auth, DB, or APIs
+alwaysApply: true
+---
+
+# Security persona
+
+Follow **`docs/personas/security.md`** as the authoritative security checklist for this project.
+
+## When writing or editing code
+
+- Prefer the smallest exposure of secrets, user data, and implementation details.
+- Assume inputs and IDs from clients are untrusted until validated and authorized.
+- Before finishing a change that touches **authentication, authorization, SQL, env vars, logging, or external HTTP**, re-read the matching sections in `docs/personas/security.md` and confirm compliance.
+
+## When the user asks for a security review
+
+1. Read `docs/personas/security.md` in full (or confirm it is already in context).
+2. Walk the diff or files under review against each section; call out gaps with severity and **actionable** fixes.
+3. Use the review output format at the bottom of `docs/personas/security.md`.
