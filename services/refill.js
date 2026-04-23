@@ -165,7 +165,16 @@ export async function refillQueue(feedId) {
   );
 
   async function processTerm(term) {
-    const { products, source } = await fetchFromApi(term, feed);
+    let products = [];
+    let source = "amazon";
+    try {
+      ({ products, source } = await fetchFromApi(term, feed));
+    } catch (err) {
+      await logRefill(`term="${term}" API failed`, {
+        message: err?.message || String(err),
+      });
+      return;
+    }
     await logRefill(
       `term="${term}" ${source} API: ${products.length} items`,
       products.map((p) => ({
