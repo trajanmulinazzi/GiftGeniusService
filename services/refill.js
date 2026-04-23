@@ -147,6 +147,14 @@ export async function refillQueue(feedId) {
   const isInitial = queueSize === 0;
   const searchTerms = await getSearchTermsForRefill(feedId, isInitial);
   if (!searchTerms.length) return 0;
+  const terms = Array.from(
+    new Set(
+      searchTerms
+        .map((t) => (typeof t === "string" ? t.trim() : ""))
+        .filter(Boolean)
+    )
+  );
+  if (!terms.length) return 0;
 
   const seenSet = await getSeenSourceIds(feedId);
   const candidateIds = [];
@@ -156,7 +164,7 @@ export async function refillQueue(feedId) {
     searchTerms
   );
 
-  for (const term of searchTerms) {
+  async function processTerm(term) {
     const { products, source } = await fetchFromApi(term, feed);
     await logRefill(
       `term="${term}" ${source} API: ${products.length} items`,
@@ -181,12 +189,21 @@ export async function refillQueue(feedId) {
         candidateIds.push(id);
       }
     }
-    if (candidateIds.length >= REFILL_TARGET_SIZE) break;
-    if (
-      candidateIds.length >= REFILL_THRESHOLD &&
-      searchTerms.indexOf(term) === searchTerms.length - 1
-    )
-      break;
+  }
+
+  // Always sample from the top 3 highest-priority terms first.
+  const headTerms = terms.slice(0, 3);
+  const tailTerms = terms.slice(3);
+  for (const term of headTerms) {
+    await processTerm(term);
+  }
+
+  // After top-3 sampling, continue filling until target size.
+  if (candidateIds.length < REFILL_TARGET_SIZE) {
+    for (const term of tailTerms) {
+      await processTerm(term);
+      if (candidateIds.length >= REFILL_TARGET_SIZE) break;
+    }
   }
 
   if (candidateIds.length === 0) return 0;

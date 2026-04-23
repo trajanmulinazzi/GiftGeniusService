@@ -16,12 +16,15 @@ export async function createFeed({
   occasion,
 }) {
   const pool = await getDb();
-  const interestsJson =
-    typeof interests === "string" ? interests : JSON.stringify(interests || []);
+  const interestsArray =
+    typeof interests === "string" ? [interests] : Array.isArray(interests) ? interests : [];
+  const interestsJson = JSON.stringify(interestsArray);
+  const initialTagWeights = buildInitialTagWeights(interestsArray);
+  const initialTagWeightsJson = JSON.stringify(initialTagWeights);
 
   const result = await pool.query(
-    `INSERT INTO feeds (user_id, name, age_min, age_max, relationship, interests, budget_min, budget_max, occasion)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO feeds (user_id, name, age_min, age_max, relationship, interests, budget_min, budget_max, occasion, tag_weights)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       userId,
@@ -33,10 +36,25 @@ export async function createFeed({
       budgetMin ?? null,
       budgetMax ?? null,
       occasion ?? null,
+      initialTagWeightsJson,
     ]
   );
   persistDb();
   return result.rows[0].id;
+}
+
+function buildInitialTagWeights(interests) {
+  const out = {};
+  for (const interest of interests || []) {
+    if (typeof interest !== "string") continue;
+    const text = interest.trim();
+    if (!text) continue;
+    // Initial hobby input is stored directly (no canonical mapping).
+    // This preserves exact user intent and sends the same terms to API search.
+    const key = text.toLowerCase();
+    out[key] = (out[key] || 0) + 1;
+  }
+  return out;
 }
 
 export async function getFeedsByUser(userId) {
