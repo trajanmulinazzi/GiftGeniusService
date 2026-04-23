@@ -1,0 +1,364 @@
+~/giftgenius-engine  main !4 ?2  npm run amazon:response "hiking gift for men"                                INT х 
+
+> giftgenius-engine@0.0.1 amazon:response
+> node scripts/amazon-api-response.js hiking gift for men
+
+[dotenv@17.2.4] injecting env (6) from .env.local -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[dotenv@17.2.4] injecting env (0) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+{
+  "searchResult": {
+    "totalResultCount": 306,
+    "searchURL": "https://www.amazon.com/s?k=hiking+gift+for+men&rh=p_n_availability%3A2661600011&tag=wobblyskunk-20&linkCode=osi",
+    "items": [
+      {
+        "asin": "B01MD0MBKI",
+        "detailPageURL": "https://www.amazon.com/dp/B01MD0MBKI?tag=wobblyskunk-20&linkCode=osi&th=1&psc=1",
+        "images": {
+          "primary": {
+            "medium": {
+              "url": "https://m.media-amazon.com/images/I/315UqqqoOvL._SL160_.jpg",
+              "height": 160,
+              "width": 108
+            }
+          }
+        },
+        "itemInfo": {
+          "byLineInfo": {
+            "brand": {
+              "displayValue": "ust",
+              "label": "Brand",
+              "locale": "en_US"
+            },
+            "manufacturer": {
+              "displayValue": "UST - Ultimate Survival Technologies",
+              "label": "Manufacturer",
+              "locale": "en_US"
+            }
+          },
+          "classifications": {
+            "binding": {
+              "displayValue": "Apparel",
+              "label": "Binding",
+              "locale": "en_US"
+            },
+            "productGroup": {
+              "displayValue": "Outdoors",
+              "label": "ProductGroup",
+              "locale": "en_US"
+            }
+          },
+          "features": {
+            "displayValues": [
+              "Dimensions: 3.6 H x 2.5 W x 0.1 D and weighs 1.2 oz",
+              "Reliable: handy carabiner included for clipping onto backpacks and other gear for outdoor activities",
+              "Durable: stainless steel construction to withstand use in any situation",
+              "Convenient: tsa compliant for safe travel",
+              "Includes: ruler (1 inch), 1.5 inch carabiner, bottle opener, cord cutter, flat head screwdriver, phillips head screwdriver, butterfly wrench, can opener, 4 hex wrench positions.guaranteed: this product is covered by a limited lifetime warranty provided by us"
+            ],
+            "label": "Features",
+            "locale": "en_US"
+          },
+          "productInfo": {
+            "color": {
+              "displayValue": "Black",
+              "label": "Color",
+              "locale": "en_US"
+            },
+            "itemDimensions": {
+              "height": {
+                "displayValue": 0.1,
+                "label": "Height",
+                "locale": "en_US",
+                "unit": "inches"
+              },
+              "length": {
+                "displayValue": 3.6,
+                "label": "Length",
+                "locale": "en_US",
+                "unit": "inches"
+              },
+              "weight": {
+                "displayValue": 0.0881849048,
+                "label": "Weight",
+                "locale": "en_US",
+                "unit": "Pounds"
+              },
+              "width": {
+                "displayValue": 2.6,
+                "label": "Width",
+                "locale": "en_US",
+                "unit": "inches"
+              }
+            },
+            "releaseDate": {
+              "displayValue": "2018-01-01T00:00:01Z",
+              "label": "ReleaseDate",
+              "locale": "en_US"
+            },
+            "size": {
+              "displayValue": "One Size",
+              "label": "Size",
+              "locale": "en_US"
+            },
+            "unitCount": {
+              "displayValue": 1,
+              "label": "NumberOfItems",
+              "locale": "en_US"
+            }
+          },
+          "title": {
+            "displayValue": "ust tool-a-long multi-tool carabiners with durable, compact stainless steel construction for hiking, kayaking, camping, travel and outdoor survival, asquatch",
+            "label": "Title",
+            "locale": "en_US"
+          }
+        },
+        "offersV2": {
+          "listings": [
+            {
+              "availability": {
+                "message": "In Stock",
+                "maxOrderQuantity": 30,
+                "minOrderQuantity": 1,
+                "type": "IN_STOCK"
+              },
+              "isBuyBoxWinner": true,
+              "price": {
+                "money": {
+                  "amount": 9.6,
+                  "currency": "USD",
+                  "displayAmount": "$9.60"
+                }
+              },
+              "violatesMAP": false
+            }
+          ]
+        }
+      },
+      {
+        "asin": "B0CF97GFS1",
+        "detailPageURL": "https://www.amazon.com/dp/B0CF97GFS1?tag=wobblyskunk-20&linkCode=osi&th=1&psc=1",
+        "images": {
+          "primary": {
+            "medium": {
+              "url": "https://m.media-amazon.com/images/I/41n40K9Xd7L._SL160_.jpg",
+              "height": 160,
+              "width": 160
+            }
+          }
+        },
+        "itemInfo": {
+          "byLineInfo": {
+            "brand": {
+              "displayValue": "FUNBRO",
+              "label": "Brand",
+              "locale": "en_US"
+            },
+            "manufacturer": {
+              "displayValue": "FUNBRO",
+              "label": "Manufacturer",
+              "locale": "en_US"
+            }
+          },
+          "classifications": {
+            "binding": {
+              "displayValue": "Unknown Binding",
+              "label": "Binding",
+              "locale": "en_US"
+            },
+            "productGroup": {
+              "displayValue": "Tools",
+              "label": "ProductGroup",
+              "locale": "en_US"
+            }
+          },
+          "features": {
+            "displayValues": [
+              "Sturdy and Reliable: The blade of this small pocket knife is made of high-quality stainless steel, ensuring exceptional strength and durability. The handle is skillfully constructed using ABS, which is not only finley crafted, but build to last.",
+              "Lightweight and Portable: Measuring at a compact 3.94 inches in length and weighing just 2 ounces, this mini box cutter fits perfectly in your palm. Its small size and convenient foldable design make it the ideal carabiner keychain for men women everyday carry.",
+              "Multi-Usage: Our folding pocket knife is perfect for outdoor activities like hunting,camping,hiking and survival, while also being an edc knife gear for cutting rope, box, paper, twig and fruits.",
+              "Great Gift Idea: The cool pocket knife is a great gift for for men and women, Stocking stuffers, Christmas, Birthday, Anniversary, Thanksgiving gifts. Great helpful for hunter, fisherman, camper, hiker, traveler, etc.",
+              "Christmas Stocking Stuffers for Men: Mens gifts for christmas, men stocking stuffers, unique stocking stuffers for him, stocking stuffers for dad."
+            ],
+            "label": "Features",
+            "locale": "en_US"
+          },
+          "productInfo": {
+            "color": {
+              "displayValue": "Black",
+              "label": "Color",
+              "locale": "en_US"
+            }
+          },
+          "title": {
+            "displayValue": "FUNBRO Small Pocket Knife Gift for Men, Keychain Box Cutter with 1.34inch Blade, Mini Folding Knives EDC Gadgets for Everyday Carry, Stocking Stuffers Gift for Adults Men Him",
+            "label": "Title",
+            "locale": "en_US"
+          }
+        },
+        "offersV2": {
+          "listings": [
+            {
+              "availability": {
+                "message": "In Stock",
+                "maxOrderQuantity": 10,
+                "minOrderQuantity": 1,
+                "type": "IN_STOCK"
+              },
+              "isBuyBoxWinner": true,
+              "price": {
+                "money": {
+                  "amount": 7.98,
+                  "currency": "USD",
+                  "displayAmount": "$7.98"
+                },
+                "savings": {
+                  "money": {
+                    "amount": 9.01,
+                    "currency": "USD",
+                    "displayAmount": "$9.01"
+                  },
+                  "percentage": 53
+                },
+                "savingBasis": {
+                  "money": {
+                    "amount": 16.99,
+                    "currency": "USD",
+                    "displayAmount": "$16.99"
+                  },
+                  "savingBasisType": "LIST_PRICE",
+                  "savingBasisTypeLabel": "List Price:"
+                }
+              },
+              "violatesMAP": false
+            }
+          ]
+        }
+      },
+      {
+        "asin": "B075WNJGCQ",
+        "detailPageURL": "https://www.amazon.com/dp/B075WNJGCQ?tag=wobblyskunk-20&linkCode=osi&th=1&psc=1",
+        "images": {
+          "primary": {
+            "medium": {
+              "url": "https://m.media-amazon.com/images/I/512xCRKB0XL._SL160_.jpg",
+              "height": 160,
+              "width": 160
+            }
+          }
+        },
+        "itemInfo": {
+          "byLineInfo": {
+            "brand": {
+              "displayValue": "FEEMIC",
+              "label": "Brand",
+              "locale": "en_US"
+            },
+            "manufacturer": {
+              "displayValue": "Emarth",
+              "label": "Manufacturer",
+              "locale": "en_US"
+            }
+          },
+          "classifications": {
+            "binding": {
+              "displayValue": "Electronics",
+              "label": "Binding",
+              "locale": "en_US"
+            },
+            "productGroup": {
+              "displayValue": "Camera",
+              "label": "ProductGroup",
+              "locale": "en_US"
+            }
+          },
+          "features": {
+            "displayValues": [
+              "【WIDE-ANGLE AND HD VIEW】High quality precision design featuring all glass high end optics, (FMC Superior BAK-4 Green Film Prism), The High Power monocular telescope provides 8X magnification with 42mm objective diameter wide lens, 360ft/1000yards of large field of view, let you have the best view in outdoor adventures",
+              "【LIFE-WATERPROOF, FOGPROOF, DUST-PROOF, SHOCKPROOF】Nitrogen-filled waterproof, This monocular built in lens dust cover can prevent lens from dust/moisture/debris, make sure you see everything in a clear detail. Its rubber finish has shock resistance, durable external protection makes it usable to withstand the tough weather conditions",
+              "【High Quality】The 8x42 monocular is made of high quality material. Large BAK-4 Prism and FMC Fully Multi-coated Lens Elements strengthen the key function of a monocular. High light transmittance reaches up to 99.9%. Light reflection and minimal distortion, multi coated optics guarantee superior light transmission and brightness. Low-light-level night vision built-in design help you see things in low light",
+              "【Comfortable Convenient】This compact monocular (5.7''x1.9''x1.5'') is convenient to use by single hand. Adjustable eye cups can be easily and rapidly twisted up and down for optimal viewing with or without glasses. Rubber armor with stripes increases the friction, keeps it from slipping out from your hand. The monocular scope also comes with hand strap and carry case, There also has a tripod connector at the bottom of monocular offers steady viewing when connect a monocular tripod",
+              "【Wide Application And Satisfaction Service】The Easy focusing HD monocular perfect for Hiking, Hunting, Climbing, Bird watching, Watching Wildlife and Scenery, Golf, Scope, Surveillance, concerts and travelling etc. Come with friendly customer service, 30-days hassle-free money back service. NO ANY worries about your purchase. Also a great gift for your family or friends"
+            ],
+            "label": "Features",
+            "locale": "en_US"
+          },
+          "productInfo": {
+            "color": {
+              "displayValue": "dark black",
+              "label": "Color",
+              "locale": "en_US"
+            },
+            "isAdultProduct": {
+              "displayValue": false,
+              "label": "IsAdultProduct",
+              "locale": "en_US"
+            },
+            "itemDimensions": {
+              "height": {
+                "displayValue": 3,
+                "label": "Height",
+                "locale": "en_US",
+                "unit": "inches"
+              },
+              "length": {
+                "displayValue": 5.7,
+                "label": "Length",
+                "locale": "en_US",
+                "unit": "inches"
+              },
+              "weight": {
+                "displayValue": 0.6283174467,
+                "label": "Weight",
+                "locale": "en_US",
+                "unit": "Pounds"
+              },
+              "width": {
+                "displayValue": 2,
+                "label": "Width",
+                "locale": "en_US",
+                "unit": "inches"
+              }
+            },
+            "releaseDate": {
+              "displayValue": "2018-09-07T00:00:01Z",
+              "label": "ReleaseDate",
+              "locale": "en_US"
+            },
+            "unitCount": {
+              "displayValue": 1,
+              "label": "NumberOfItems",
+              "locale": "en_US"
+            }
+          },
+          "title": {
+            "displayValue": "Monocular Telescope High Power 8x42 Monoculars Scope Compact Waterproof Fogproof Shockproof with Hand Strap for Adults Kids Bird Watching Hunting Camping Hiking Travling Wildlife Secenery",
+            "label": "Title",
+            "locale": "en_US"
+          }
+        },
+        "offersV2": {
+          "listings": [
+            {
+              "availability": {
+                "message": "In Stock",
+                "maxOrderQuantity": 10,
+                "minOrderQuantity": 1,
+                "type": "IN_STOCK"
+              },
+              "isBuyBoxWinner": true,
+              "price": {
+                "money": {
+                  "amount": 35.99,
+                  "currency": "USD",
+                  "displayAmount": "$35.99"
+                }
+              },
+              "violatesMAP": false
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+                                                                 ✔ 

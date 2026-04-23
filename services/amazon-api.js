@@ -39,7 +39,15 @@ function getApi() {
   const credentialId = process.env.AMAZON_CREDENTIAL_ID;
   const credentialSecret = process.env.AMAZON_CREDENTIAL_SECRET;
   const partnerTag = process.env.AMAZON_PARTNER_TAG;
-  const version = process.env.AMAZON_CREDENTIAL_VERSION || "2.1";
+  // 2.x = Cognito token hosts; 3.x = Login with Amazon (LWA) at api.amazon.* — must match the credential type from Associates Central.
+  const rawVersion = (process.env.AMAZON_CREDENTIAL_VERSION || "2.1").trim();
+  const allowed = new Set(["2.1", "2.2", "2.3", "3.1", "3.2", "3.3"]);
+  if (!allowed.has(rawVersion)) {
+    throw new Error(
+      `Invalid AMAZON_CREDENTIAL_VERSION="${rawVersion}". Use 2.1/2.2/2.3 (Cognito) or 3.1/3.2/3.3 (LWA). For US: 2.1 or 3.1 depending on whether your credentials say v2 or v3.`
+    );
+  }
+  const version = rawVersion;
   const marketplace = process.env.AMAZON_MARKETPLACE || "www.amazon.com";
 
   if (!credentialId || !credentialSecret || !partnerTag) {
@@ -175,6 +183,24 @@ export async function searchItemsRaw(keywords, opts = {}) {
   return await api.searchItems(marketplace, {
     searchItemsRequestContent: req,
   });
+}
+
+/**
+ * Call GetItems once and return the raw API response (for debugging).
+ * @param {string|string[]} asins
+ * @returns {Promise<object>} Raw response from api.getItems()
+ */
+export async function getItemsRaw(asins) {
+  const { api, marketplace, partnerTag } = getApi();
+  const ids = Array.isArray(asins) ? asins.slice(0, 10) : [asins];
+
+  const req = new GetItemsRequestContent();
+  req.partnerTag = partnerTag;
+  req.itemIds = ids;
+  req.condition = "New";
+  req.resources = GET_ITEMS_RESOURCES;
+
+  return await api.getItems(marketplace, req);
 }
 
 /**

@@ -1,7 +1,7 @@
 /**
- * Call the Amazon Creators API SearchItems once and print the raw response.
- * Usage: npm run amazon:response [keywords]
- * Example: npm run amazon:response hiking
+ * Call the Amazon Creators API GetItems once and print the raw response.
+ * Usage: npm run amazon:item-response [asin]
+ * Example: npm run amazon:item-response B073CVZ9GZ
  * Requires AMAZON_CREDENTIAL_ID, AMAZON_CREDENTIAL_SECRET, AMAZON_PARTNER_TAG in .env.local
  */
 
@@ -9,9 +9,9 @@ import { config } from "dotenv";
 config({ path: ".env.local" });
 config();
 
-import { searchItemsRaw } from "../services/amazon-api.js";
+import { getItemsRaw } from "../services/amazon-api.js";
 
-const keywords = process.argv.slice(2).join(" ") || "hiking";
+const asin = process.argv[2] || "B073CVZ9GZ";
 
 function oauthHintFromErr(err) {
   const text = err?.response?.text ?? err?.text ?? "";
@@ -23,7 +23,11 @@ function oauthHintFromErr(err) {
       body = null;
     }
   }
-  const oauthErr = body?.error ?? (typeof text === "string" && text.includes("invalid_client") ? "invalid_client" : null);
+  const oauthErr =
+    body?.error ??
+    (typeof text === "string" && text.includes("invalid_client")
+      ? "invalid_client"
+      : null);
   if (oauthErr !== "invalid_client") return null;
   return [
     "OAuth token step failed with invalid_client (wrong client_id + client_secret for the token host, or wrong AMAZON_CREDENTIAL_VERSION).",
@@ -33,7 +37,7 @@ function oauthHintFromErr(err) {
 }
 
 try {
-  const response = await searchItemsRaw(keywords, { itemCount: 3 });
+  const response = await getItemsRaw([asin]);
   console.log(JSON.stringify(response, null, 2));
 } catch (err) {
   const hint = oauthHintFromErr(err);
