@@ -77,10 +77,43 @@ function toTag(value, maxLen = 40) {
 /**
  * Extract keyword from a feature string (one short word) for tagging.
  */
-function featureToTag(feature) {
-  if (typeof feature !== "string" || !feature.trim()) return null;
-  const words = feature.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4);
-  return words[0]?.slice(0, 30) || null;
+function tokenizeText(value) {
+  if (typeof value !== "string") return [];
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 2);
+}
+
+function mappedFromText(value, { maxGram = 3, maxCandidates = 20 } = {}) {
+  const words = tokenizeText(value);
+  if (!words.length) return [];
+
+  const raw = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    if (!candidate || seen.has(candidate)) return;
+    seen.add(candidate);
+    raw.push(candidate);
+  };
+
+  for (let i = 0; i < words.length; i++) {
+    for (let n = maxGram; n >= 1; n--) {
+      if (i + n > words.length) continue;
+      const phrase = words.slice(i, i + n).join("-");
+      add(phrase);
+      if (raw.length >= maxCandidates) break;
+    }
+    if (raw.length >= maxCandidates) break;
+  }
+  return normalizeTags(raw);
+}
+
+function featureToMappedTags(feature) {
+  // Only mapped tags are kept; generic adjectives get dropped unless explicitly mapped.
+  return mappedFromText(feature, { maxGram: 3, maxCandidates: 24 });
 }
 
 /**
@@ -121,36 +154,52 @@ function itemToProduct(item, partnerTag) {
       ? `https://www.amazon.com/dp/${asin}${partnerTag ? `?tag=${partnerTag}` : ""}`
       : null);
 
-  const tags = [];
-  const seen = new Set();
-
-  const add = (tag) => {
-    if (tag && !seen.has(tag)) {
-      seen.add(tag);
-      tags.push(tag);
-    }
+  const rawTags = [];
+  const seenRaw = new Set();
+  const addRaw = (value) => {
+    if (!value) return;
+    const v = String(value).trim();
+    if (!v || seenRaw.has(v)) return;
+    seenRaw.add(v);
+    rawTags.push(v);
+  };
+  const addMappedFromText = (value, opts) => {
+    const mapped = mappedFromText(value, opts);
+    for (const tag of mapped) addRaw(tag);
   };
 
+  const addMappedFromList = (values, opts) => {
+    if (!Array.isArray(values)) return;
+    for (const value of values) addMappedFromText(value, opts);
+  };
+
+  // 1) Category mapping first (highest confidence)
   const itemInfo = item.itemInfo || {};
   const classif = itemInfo.classifications || {};
-  add(toTag(classif.productGroup?.displayValue));
-  add(toTag(classif.binding?.displayValue));
+  addRaw(toTag(classif.productGroup?.displayValue));
+  addRaw(toTag(classif.binding?.displayValue));
 
+  // 2) Title phrase mapping
+  const displayTitle = itemInfo.title?.displayValue || title;
+  addMappedFromText(displayTitle, { maxGram: 3, maxCandidates: 32 });
+
+  // 3) Feature keyword mapping (mapped terms only)
+  const features = itemInfo.features?.displayValues || [];
+  addMappedFromList(features.slice(0, 6), { maxGram: 3, maxCandidates: 28 });
+
+  // 4) Brand as weak signal (mapped brand only)
   const byLine = itemInfo.byLineInfo || {};
-  add(toTag(byLine.brand?.displayValue));
+  addMappedFromText(byLine.brand?.displayValue, { maxGram: 2, maxCandidates: 8 });
 
   const productInfo = itemInfo.productInfo || {};
-  add(toTag(productInfo.color?.displayValue));
-  add(toTag(productInfo.size?.displayValue));
-
-  const features = itemInfo.features?.displayValues || [];
-  if (Array.isArray(features)) {
-    for (const f of features.slice(0, 5)) {
-      add(featureToTag(typeof f === "string" ? f : String(f)));
+  addRaw(toTag(productInfo.color?.displayValue));
+  addRaw(toTag(productInfo.size?.displayValue));
+  for (const f of features.slice(0, 6)) {
+    for (const tag of featureToMappedTags(typeof f === "string" ? f : String(f))) {
+      addRaw(tag);
     }
   }
 
-  const rawTags = tags.filter(Boolean);
   const canonical = normalizeTags(rawTags);
 
   return {

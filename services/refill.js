@@ -12,6 +12,7 @@ import { getSeenSourceIds } from "../models/interaction.js";
 import { upsertProduct, getProductsByIds } from "../models/catalog.js";
 import { appendToQueue, getQueueSize } from "../models/queue.js";
 import { rankItems } from "./ranking.js";
+import { normalizeTags } from "../data/tag-canonical.js";
 
 const REFILL_TARGET_SIZE = 6;
 const REFILL_THRESHOLD = 3;
@@ -100,6 +101,13 @@ function parseTags(tags) {
   return [];
 }
 
+function tagsFromSearchTerm(term) {
+  const text = typeof term === "string" ? term.trim().toLowerCase() : "";
+  if (!text) return [];
+  const raw = [text, ...text.split(/\s+/).filter(Boolean)];
+  return normalizeTags(raw);
+}
+
 /**
  * Select up to targetSize items from ranked list, capping how many items share the same tag.
  * Preserves ranking order; skips an item only if adding it would exceed maxPerTag for any of its tags.
@@ -162,6 +170,10 @@ export async function refillQueue(feedId) {
       const key = `${p.source || "amazon"}:${p.source_id}`;
       if (seenSet.has(key)) continue;
       if (!inBudget(p, feed)) continue;
+      if (!Array.isArray(p.tags) || p.tags.length === 0) {
+        // Fallback when API metadata doesn't map: derive tags from the term that fetched this item.
+        p.tags = tagsFromSearchTerm(term);
+      }
 
       const id = await upsertProduct(p);
       if (id) {
