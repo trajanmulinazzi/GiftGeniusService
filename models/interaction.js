@@ -85,3 +85,18 @@ export async function getDislikedItems(feedId) {
   );
   return result.rows;
 }
+
+/**
+ * Get catalog items explicitly saved for a feed.
+ */
+export async function getSavedItems(feedId) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `SELECT c.* FROM catalog c
+     INNER JOIN interactions i ON i.catalog_item_id = c.id
+     WHERE i.feed_id = $1 AND i.type = 'save'
+     ORDER BY i.created_at DESC`,
+    [feedId]
+  );
+  return result.rows;
+}
