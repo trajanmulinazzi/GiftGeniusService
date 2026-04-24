@@ -143,6 +143,83 @@ npm start
 
 You do **not** need to seed the catalog before running; refill fetches from the API when the queue is empty or low.
 
+### Run the API (Fastify)
+
+```bash
+npm run start:api
+```
+
+Default base URL: `http://127.0.0.1:3000`
+
+Quick checks:
+
+```bash
+curl -s http://127.0.0.1:3000/health
+curl -s http://127.0.0.1:3000/users
+```
+
+#### API endpoint examples (copy/paste)
+
+Create user:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/users \
+  -H "content-type: application/json" \
+  -d '{"name":"Api User","email":"api-user@example.com"}'
+```
+
+Create feed:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/feeds \
+  -H "content-type: application/json" \
+  -d '{"userId":1,"name":"Mom","relationship":"mom","interests":["reading","hiking"],"budgetMin":10,"budgetMax":100}'
+```
+
+List feeds for user:
+
+```bash
+curl -s "http://127.0.0.1:3000/feeds?userId=1"
+```
+
+Get next item for a feed (secured via `x-user-id` header):
+
+```bash
+curl -s http://127.0.0.1:3000/feeds/1/next \
+  -H "x-user-id: 1"
+```
+
+Record interaction:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/feeds/1/interactions \
+  -H "x-user-id: 1" \
+  -H "content-type: application/json" \
+  -d '{"catalogItemId":56,"type":"like"}'
+```
+
+List saved items:
+
+```bash
+curl -s http://127.0.0.1:3000/feeds/1/saved \
+  -H "x-user-id: 1"
+```
+
+Notes:
+
+- Feed-scoped routes require `x-user-id`.
+- `x-user-id` must match the owner of `:feedId`.
+- Error format is consistent:
+
+```json
+{
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Invalid request body"
+  }
+}
+```
+
 ### View the database (optional)
 
 Connect to Postgres via psql:

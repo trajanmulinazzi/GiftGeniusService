@@ -29,6 +29,29 @@ await app.register(rateLimit, {
   timeWindow: "1 minute",
 });
 
+const errorResponseSchema = {
+  type: "object",
+  required: ["error"],
+  properties: {
+    error: {
+      type: "object",
+      required: ["code", "message"],
+      properties: {
+        code: { type: "string" },
+        message: { type: "string" },
+      },
+    },
+  },
+};
+
+const authHeadersSchema = {
+  type: "object",
+  required: ["x-user-id"],
+  properties: {
+    "x-user-id": { type: "string", description: "Authenticated user id" },
+  },
+};
+
 function sendError(reply, statusCode, code, message) {
   return reply.code(statusCode).send({
     error: {
@@ -75,18 +98,72 @@ app.setErrorHandler((err, request, reply) => {
   return sendError(reply, 500, "INTERNAL_ERROR", "Unexpected server error");
 });
 
-app.get("/health", async () => {
+app.get(
+  "/health",
+  {
+    schema: {
+      tags: ["system"],
+      summary: "Health check",
+      response: {
+        200: {
+          type: "object",
+          required: ["ok"],
+          properties: { ok: { type: "boolean" } },
+        },
+      },
+    },
+  },
+  async () => {
   // Ensure DB is reachable so health reflects real backend readiness.
   await getDb();
   return { ok: true };
-});
+  }
+);
 
-app.get("/users", async () => {
+app.get(
+  "/users",
+  {
+    schema: {
+      tags: ["users"],
+      summary: "List users",
+    },
+  },
+  async () => {
   const users = await listUsers();
   return { users };
-});
+  }
+);
 
-app.post("/users", async (request, reply) => {
+app.post(
+  "/users",
+  {
+    schema: {
+      tags: ["users"],
+      summary: "Create user",
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 120 },
+          email: { type: "string", format: "email", maxLength: 320 },
+        },
+      },
+      response: {
+        201: {
+          type: "object",
+          required: ["id", "name"],
+          properties: {
+            id: { type: "number" },
+            name: { type: "string" },
+            email: { type: ["string", "null"] },
+          },
+        },
+        400: errorResponseSchema,
+      },
+    },
+  },
+  async (request, reply) => {
   const schema = z
     .object({
       name: z.string().trim().min(1).max(120),
@@ -100,9 +177,30 @@ app.post("/users", async (request, reply) => {
   const { name, email } = parsed.data;
   const id = await createUser({ name, email: email ?? null });
   return reply.code(201).send({ id, name, email: email ?? null });
-});
+  }
+);
 
-app.get("/feeds", async (request, reply) => {
+app.get(
+  "/feeds",
+  {
+    schema: {
+      tags: ["feeds"],
+      summary: "List feeds by user",
+      querystring: {
+        type: "object",
+        required: ["userId"],
+        additionalProperties: false,
+        properties: {
+          userId: { type: "integer", minimum: 1 },
+        },
+      },
+      response: {
+        400: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    },
+  },
+  async (request, reply) => {
   const schema = z
     .object({
       userId: z.coerce.number().int().positive(),
@@ -124,9 +222,44 @@ app.get("/feeds", async (request, reply) => {
   }
   const feeds = await getFeedsByUser(parsed.data.userId);
   return { feeds };
-});
+  }
+);
 
-app.post("/feeds", async (request, reply) => {
+app.post(
+  "/feeds",
+  {
+    schema: {
+      tags: ["feeds"],
+      summary: "Create feed",
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["userId", "name"],
+        properties: {
+          userId: { type: "integer", minimum: 1 },
+          name: { type: "string", minLength: 1, maxLength: 120 },
+          relationship: { type: "string", maxLength: 120 },
+          interests: {
+            type: "array",
+            maxItems: 30,
+            items: { type: "string", minLength: 1, maxLength: 80 },
+          },
+          budgetMin: { type: "number", minimum: 0, maximum: 1000000 },
+          budgetMax: { type: "number", minimum: 0, maximum: 1000000 },
+        },
+      },
+      response: {
+        201: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "number" } },
+        },
+        400: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    },
+  },
+  async (request, reply) => {
   const schema = z
     .object({
       userId: z.coerce.number().int().positive(),
@@ -161,13 +294,31 @@ app.post("/feeds", async (request, reply) => {
     occasion: null,
   });
   return reply.code(201).send({ id });
-});
+  }
+);
 
 app.get(
   "/feeds/:feedId/next",
   {
     preHandler: [requireUserIdHeader, requireOwnedFeed],
     config: { rateLimit: { max: 90, timeWindow: "1 minute" } },
+    schema: {
+      tags: ["feeds"],
+      summary: "Get next item for feed",
+      headers: authHeadersSchema,
+      params: {
+        type: "object",
+        required: ["feedId"],
+        properties: {
+          feedId: { type: "integer", minimum: 1 },
+        },
+      },
+      response: {
+        401: errorResponseSchema,
+        403: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    },
   },
   async (request, reply) => {
     const feedId = request.feed.id;
@@ -221,6 +372,37 @@ app.post(
   {
     preHandler: [requireUserIdHeader, requireOwnedFeed],
     config: { rateLimit: { max: 120, timeWindow: "1 minute" } },
+    schema: {
+      tags: ["feeds"],
+      summary: "Record interaction for feed item",
+      headers: authHeadersSchema,
+      params: {
+        type: "object",
+        required: ["feedId"],
+        properties: {
+          feedId: { type: "integer", minimum: 1 },
+        },
+      },
+      body: {
+        type: "object",
+        required: ["catalogItemId", "type"],
+        additionalProperties: false,
+        properties: {
+          catalogItemId: { type: "integer", minimum: 1 },
+          type: { type: "string", enum: ["like", "pass", "save"] },
+        },
+      },
+      response: {
+        200: {
+          type: "object",
+          required: ["ok"],
+          properties: { ok: { type: "boolean" } },
+        },
+        400: errorResponseSchema,
+        401: errorResponseSchema,
+        403: errorResponseSchema,
+      },
+    },
   },
   async (request, reply) => {
     const schema = z
@@ -267,6 +449,22 @@ app.get(
   {
     preHandler: [requireUserIdHeader, requireOwnedFeed],
     config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    schema: {
+      tags: ["feeds"],
+      summary: "List saved items for feed",
+      headers: authHeadersSchema,
+      params: {
+        type: "object",
+        required: ["feedId"],
+        properties: {
+          feedId: { type: "integer", minimum: 1 },
+        },
+      },
+      response: {
+        401: errorResponseSchema,
+        403: errorResponseSchema,
+      },
+    },
   },
   async (request) => {
     const saved = await getSavedItems(request.feed.id);
