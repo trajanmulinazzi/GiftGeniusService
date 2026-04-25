@@ -51,6 +51,11 @@ const corsAllowedOrigins = corsAllowedOriginsRaw
   .map((v) => v.trim())
   .filter(Boolean);
 const isProd = process.env.NODE_ENV === "production";
+if (isProd && corsAllowedOrigins.length === 0) {
+  throw new Error(
+    "Missing CORS_ALLOWED_ORIGINS in production. Set explicit frontend origin allowlist."
+  );
+}
 const ERROR_CODES = {
   BAD_REQUEST: "BAD_REQUEST",
   UNAUTHORIZED: "UNAUTHORIZED",
@@ -327,7 +332,7 @@ app.get(
   {
     schema: {
       tags: ["system"],
-      summary: "Health check",
+      summary: "Liveness check",
       response: {
         200: {
           type: "object",
@@ -341,10 +346,42 @@ app.get(
       },
     },
   },
-  async () => {
-  // Ensure DB is reachable so health reflects real backend readiness.
-  await getDb();
-  return { ok: true, service: "giftgenius-engine" };
+  async () => ({ ok: true, service: "giftgenius-engine" })
+);
+
+app.get(
+  "/ready",
+  {
+    schema: {
+      tags: ["system"],
+      summary: "Readiness check",
+      response: {
+        200: {
+          type: "object",
+          required: ["ok", "service", "db"],
+          properties: {
+            ok: { type: "boolean" },
+            service: { type: "string" },
+            db: { type: "string" },
+          },
+          examples: [{ ok: true, service: "giftgenius-engine", db: "up" }],
+        },
+        503: { ...errorResponseSchema, examples: [{ error: { code: "INTERNAL_ERROR", message: "Service not ready" } }] },
+      },
+    },
+  },
+  async (request, reply) => {
+    try {
+      const db = await getDb();
+      await db.query("SELECT 1");
+      return { ok: true, service: "giftgenius-engine", db: "up" };
+    } catch (err) {
+      request.log.error(
+        { err: { name: err?.name, message: err?.message } },
+        "readiness check failed"
+      );
+      return sendError(reply, 503, ERROR_CODES.INTERNAL_ERROR, "Service not ready");
+    }
   }
 );
 
