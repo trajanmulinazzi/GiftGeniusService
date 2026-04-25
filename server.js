@@ -205,26 +205,12 @@ async function requireAuth(request, reply) {
   try {
     await request.jwtVerify();
   } catch {
-    const allowLegacy = process.env.ALLOW_LEGACY_USER_HEADER === "1";
-    if (!allowLegacy) {
-      return sendError(
-        reply,
-        401,
-        ERROR_CODES.UNAUTHORIZED,
-        "Missing or invalid bearer token"
-      );
-    }
-    const userIdHeader = request.headers["x-user-id"];
-    const parsed = z.coerce.number().int().positive().safeParse(userIdHeader);
-    if (!parsed.success) {
-      return sendError(
-        reply,
-        401,
-        ERROR_CODES.UNAUTHORIZED,
-        "Missing or invalid bearer token"
-      );
-    }
-    request.user = { userId: parsed.data };
+    return sendError(
+      reply,
+      401,
+      ERROR_CODES.UNAUTHORIZED,
+      "Missing or invalid bearer token"
+    );
   }
 
   const userId = Number(request.user?.userId);
