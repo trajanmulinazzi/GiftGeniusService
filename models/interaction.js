@@ -92,10 +92,14 @@ export async function getDislikedItems(feedId) {
 export async function getSavedItems(feedId) {
   const pool = await getDb();
   const result = await pool.query(
-    `SELECT c.* FROM catalog c
+    `SELECT
+       c.*,
+       i.id AS interaction_id,
+       i.created_at AS saved_at
+     FROM catalog c
      INNER JOIN interactions i ON i.catalog_item_id = c.id
      WHERE i.feed_id = $1 AND i.type = 'save'
-     ORDER BY i.created_at DESC`,
+     ORDER BY i.created_at DESC, i.id DESC`,
     [feedId]
   );
   return result.rows;

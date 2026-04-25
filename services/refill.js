@@ -168,6 +168,12 @@ export async function refillQueue(feedId) {
     let products = [];
     let source = "amazon";
     try {
+      if (
+        process.env.REFILL_FAIL_TERM &&
+        term.toLowerCase() === process.env.REFILL_FAIL_TERM.toLowerCase()
+      ) {
+        throw new Error(`Simulated refill failure for term "${term}"`);
+      }
       ({ products, source } = await fetchFromApi(term, feed));
     } catch (err) {
       await logRefill(`term="${term}" API failed`, {

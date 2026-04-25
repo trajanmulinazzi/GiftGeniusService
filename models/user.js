@@ -20,6 +20,14 @@ export async function getUser(id) {
   return result.rows[0] ?? null;
 }
 
+export async function getUserByEmail(email) {
+  const pool = await getDb();
+  const result = await pool.query("SELECT * FROM users WHERE lower(email) = lower($1)", [
+    email,
+  ]);
+  return result.rows[0] ?? null;
+}
+
 export async function updateUser(id, { name, email }) {
   const pool = await getDb();
   await pool.query(
