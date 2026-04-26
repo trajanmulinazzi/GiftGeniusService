@@ -64,12 +64,19 @@ async function fetchFromApi(searchTerm, feed) {
   try {
     const products = await amazonApi.searchProducts(searchTerm, apiOpts);
     return { products, source: "amazon" };
-  } catch (_) {
-    const products = await canopyApi.searchProducts(searchTerm, {
-      limit: 20,
-      ...budget,
-    });
-    return { products, source: "canopy" };
+  } catch (amazonErr) {
+    try {
+      const products = await canopyApi.searchProducts(searchTerm, {
+        limit: 20,
+        ...budget,
+      });
+      return { products, source: "canopy" };
+    } catch (canopyErr) {
+      const err = new Error("Amazon and Canopy fetch failed");
+      err.amazonMessage = amazonErr?.message || String(amazonErr);
+      err.canopyMessage = canopyErr?.message || String(canopyErr);
+      throw err;
+    }
   }
 }
 
@@ -108,16 +115,37 @@ function tagsFromSearchTerm(term) {
   return normalizeTags(raw);
 }
 
+function relationshipFallbackTerm(feed) {
+  const relationship =
+    typeof feed?.relationship === "string" ? feed.relationship.trim().toLowerCase() : "";
+  if (!relationship) return null;
+  const normalized = relationship.replace(/\s+/g, " ");
+  return `gifts for ${normalized}`;
+}
+
+function pickRandom(values) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const idx = Math.floor(Math.random() * values.length);
+  return values[idx] ?? null;
+}
+
 /**
- * Select up to targetSize items from ranked list, capping how many items share the same tag.
- * Preserves ranking order; skips an item only if adding it would exceed maxPerTag for any of its tags.
+ * Two-pass selection:
+ * 1) Apply diversity cap first
+ * 2) Backfill remaining slots from leftover ranked items
+ * This keeps diversity as a preference while still filling the queue.
  * @param {Object[]} rankedItems - items sorted by score (best first), each with .tags (string[])
  * @param {{ targetSize: number, maxPerTag: number }} opts
- * @returns {Object[]} subset of rankedItems with diversity cap applied
+ * @returns {Object[]} subset of rankedItems
  */
-function selectWithTagCap(rankedItems, { targetSize, maxPerTag }) {
+function selectWithDiversityThenFill(rankedItems, { targetSize, maxPerTag }) {
   const selected = [];
   const tagCount = {};
+  const selectedIds = new Set();
+  let pass1Count = 0;
+  let pass2Count = 0;
+
+  // Pass 1: diversity-constrained picks.
   for (const item of rankedItems) {
     if (selected.length >= targetSize) break;
     const tags = (item.tags && Array.isArray(item.tags) ? item.tags : []).map(
@@ -127,9 +155,23 @@ function selectWithTagCap(rankedItems, { targetSize, maxPerTag }) {
       tags.length > 0 && tags.some((tag) => (tagCount[tag] || 0) >= maxPerTag);
     if (wouldExceed) continue;
     selected.push(item);
+    selectedIds.add(item.id);
+    pass1Count++;
     for (const tag of tags) tagCount[tag] = (tagCount[tag] || 0) + 1;
   }
-  return selected;
+
+  // Pass 2: fill remaining queue slots from highest-ranked leftovers.
+  if (selected.length < targetSize) {
+    for (const item of rankedItems) {
+      if (selected.length >= targetSize) break;
+      if (selectedIds.has(item.id)) continue;
+      selected.push(item);
+      selectedIds.add(item.id);
+      pass2Count++;
+    }
+  }
+
+  return { selected, pass1Count, pass2Count };
 }
 
 /**
@@ -167,6 +209,13 @@ export async function refillQueue(feedId) {
   async function processTerm(term) {
     let products = [];
     let source = "amazon";
+    const stats = {
+      fetched: 0,
+      skippedSeen: 0,
+      skippedBudget: 0,
+      fallbackTagsApplied: 0,
+      upserted: 0,
+    };
     try {
       if (
         process.env.REFILL_FAIL_TERM &&
@@ -178,9 +227,12 @@ export async function refillQueue(feedId) {
     } catch (err) {
       await logRefill(`term="${term}" API failed`, {
         message: err?.message || String(err),
+        amazonMessage: err?.amazonMessage,
+        canopyMessage: err?.canopyMessage,
       });
       return;
     }
+    stats.fetched = products.length;
     await logRefill(
       `term="${term}" ${source} API: ${products.length} items`,
       products.map((p) => ({
@@ -189,21 +241,41 @@ export async function refillQueue(feedId) {
         price_cents: p.price_cents,
       }))
     );
+    const eligible = [];
     for (const p of products) {
       const key = `${p.source || "amazon"}:${p.source_id}`;
-      if (seenSet.has(key)) continue;
-      if (!inBudget(p, feed)) continue;
+      if (seenSet.has(key)) {
+        stats.skippedSeen++;
+        continue;
+      }
+      if (!inBudget(p, feed)) {
+        stats.skippedBudget++;
+        continue;
+      }
       if (!Array.isArray(p.tags) || p.tags.length === 0) {
         // Fallback when API metadata doesn't map: derive tags from the term that fetched this item.
         p.tags = tagsFromSearchTerm(term);
+        stats.fallbackTagsApplied++;
       }
+      eligible.push({ product: p, key });
+    }
 
-      const id = await upsertProduct(p);
+    const picked = pickRandom(eligible);
+    if (picked) {
+      const id = await upsertProduct(picked.product);
       if (id) {
-        seenSet.add(key);
+        seenSet.add(picked.key);
         candidateIds.push(id);
+        stats.upserted++;
+        await logRefill(`term="${term}" picked random item`, {
+          source_id: picked.product.source_id,
+          title: (picked.product.title || "").slice(0, 60),
+          price_cents: picked.product.price_cents,
+        });
       }
     }
+    stats.eligibleAfterFilters = eligible.length;
+    await logRefill(`term="${term}" filter summary`, stats);
   }
 
   // Always sample from the top 3 highest-priority terms first.
@@ -221,6 +293,15 @@ export async function refillQueue(feedId) {
     }
   }
 
+  // Fallback: if we still have little/no inventory, query a relationship-based gift phrase.
+  if (candidateIds.length < REFILL_TARGET_SIZE) {
+    const fallbackTerm = relationshipFallbackTerm(feed);
+    if (fallbackTerm) {
+      await logRefill(`fallback relationship term="${fallbackTerm}"`);
+      await processTerm(fallbackTerm);
+    }
+  }
+
   if (candidateIds.length === 0) return 0;
 
   const rows = await getProductsByIds(candidateIds);
@@ -229,12 +310,21 @@ export async function refillQueue(feedId) {
     tags: parseTags(p.tags),
   }));
   const ranked = rankItems(parsed, feed);
-  const selected = selectWithTagCap(ranked, {
+  const { selected, pass1Count, pass2Count } = selectWithDiversityThenFill(ranked, {
     targetSize: REFILL_TARGET_SIZE,
     maxPerTag: MAX_ITEMS_PER_TAG,
   });
   const toAdd = selected.map((r) => r.id);
   const addedRows = selected;
+
+  await logRefill("selection summary", {
+    candidateIds: candidateIds.length,
+    fetchedRows: rows.length,
+    ranked: ranked.length,
+    selected: selected.length,
+    diversityPassCount: pass1Count,
+    backfillPassCount: pass2Count,
+  });
 
   await logRefill(
     `adding to queue: ${addedRows.length} items`,
