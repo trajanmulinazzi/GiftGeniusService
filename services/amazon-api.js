@@ -12,7 +12,9 @@ const { ApiClient, DefaultApi, SearchItemsRequestContent, GetItemsRequestContent
   require("@amzn/creatorsapi-nodejs-sdk");
 
 const SEARCH_RESOURCES = [
+  "images.primary.large",
   "images.primary.medium",
+  "images.primary.small",
   "itemInfo.title",
   "itemInfo.features",
   "itemInfo.classifications",
@@ -23,7 +25,9 @@ const SEARCH_RESOURCES = [
 ];
 
 const GET_ITEMS_RESOURCES = [
+  "images.primary.large",
   "images.primary.medium",
+  "images.primary.small",
   "itemInfo.title",
   "itemInfo.features",
   "itemInfo.classifications",
@@ -116,6 +120,12 @@ function featureToMappedTags(feature) {
   return mappedFromText(feature, { maxGram: 3, maxCandidates: 24 });
 }
 
+function upscaleAmazonImageUrl(url) {
+  if (typeof url !== "string" || !url) return null;
+  // Convert known Amazon size suffixes (e.g. _SL160_) to a larger size.
+  return url.replace(/_SL\d+_/i, "_SL1200_");
+}
+
 /**
  * Map Amazon API item to catalog product shape.
  * Uses tags returned by Amazon: Classifications (ProductGroup, Binding), ByLineInfo (Brand),
@@ -134,10 +144,10 @@ function itemToProduct(item, partnerTag) {
     "Untitled";
 
   const img =
+    item.images?.primary?.large ||
     item.images?.primary?.medium ||
-    item.images?.primary?.small ||
-    item.images?.primary?.large;
-  const imageUrl = img?.url || null;
+    item.images?.primary?.small;
+  const imageUrl = img?.url ? upscaleAmazonImageUrl(img.url) : null;
 
   const listings = item.offersV2?.listings || [];
   const listing = listings[0];
