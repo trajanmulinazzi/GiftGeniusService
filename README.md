@@ -155,7 +155,18 @@ Quick checks:
 
 ```bash
 curl -s http://127.0.0.1:3000/health
+curl -s http://127.0.0.1:3000/ready
 curl -s http://127.0.0.1:3000/users
+```
+
+OpenAPI docs:
+
+```bash
+# OpenAPI JSON
+curl -s http://127.0.0.1:3000/docs/json
+
+# Swagger UI
+open http://127.0.0.1:3000/docs
 ```
 
 #### API endpoint examples (copy/paste)
@@ -182,18 +193,24 @@ List feeds for user:
 curl -s "http://127.0.0.1:3000/feeds?userId=1"
 ```
 
-Get next item for a feed (secured via `x-user-id` header):
+Get next item for a feed (secured via bearer token):
 
 ```bash
+# First: login to receive JWT (requires an existing user email)
+TOKEN=$(curl -s -X POST http://127.0.0.1:3000/auth/login \
+  -H "content-type: application/json" \
+  -d '{"email":"api-user@example.com"}' | jq -r '.accessToken')
+
+# Then: call secured route with bearer token
 curl -s http://127.0.0.1:3000/feeds/1/next \
-  -H "x-user-id: 1"
+  -H "authorization: Bearer $TOKEN"
 ```
 
 Record interaction:
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/feeds/1/interactions \
-  -H "x-user-id: 1" \
+  -H "authorization: Bearer $TOKEN" \
   -H "content-type: application/json" \
   -d '{"catalogItemId":56,"type":"like"}'
 ```
@@ -202,13 +219,14 @@ List saved items:
 
 ```bash
 curl -s http://127.0.0.1:3000/feeds/1/saved \
-  -H "x-user-id: 1"
+  -H "authorization: Bearer $TOKEN"
 ```
 
 Notes:
 
-- Feed-scoped routes require `x-user-id`.
-- `x-user-id` must match the owner of `:feedId`.
+- Feed-scoped routes require `Authorization: Bearer <token>`.
+- Token identity must match the owner of `:feedId`.
+- If rate-limited (`429` / `RATE_LIMITED`), retry with exponential backoff.
 - Error format is consistent:
 
 ```json
@@ -476,6 +494,9 @@ Copy `.env.example` to `.env.local` and set as needed.
 - **Database**: Defaults match docker-compose (localhost:5432, user `giftgenius`, database `giftgenius`). Use `DATABASE_URL` or `PGHOST`/`PGUSER`/etc.
 - **Canopy API**: `CANOPY_API_KEY` (for ingest:canopy and ingest:canopy-product).
 - **Amazon**: `AMAZON_CREDENTIAL_ID`, `AMAZON_CREDENTIAL_SECRET`, `AMAZON_PARTNER_TAG` (and optional `AMAZON_CREDENTIAL_VERSION`, `AMAZON_MARKETPLACE`). Partner tag is also used for affiliate links on Canopy-ingested items.
+- **Auth**: `JWT_SECRET` is required for API token signing/verification.
+- **CORS**: `CORS_ALLOWED_ORIGINS` is a comma-separated allowlist of frontend origins in staging/prod.
+  - In `NODE_ENV=production`, server startup now fails if this value is missing/empty.
 
 ---
 
