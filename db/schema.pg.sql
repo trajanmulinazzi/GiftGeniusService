@@ -89,6 +89,19 @@ CREATE TABLE IF NOT EXISTS interactions (
 CREATE INDEX IF NOT EXISTS idx_interactions_feed ON interactions(feed_id);
 CREATE INDEX IF NOT EXISTS idx_interactions_catalog ON interactions(catalog_item_id);
 
+-- Seen items: records which catalog items were already served to a feed.
+-- Prevents re-serving duplicates even before an explicit interaction is sent.
+CREATE TABLE IF NOT EXISTS seen_items (
+  id SERIAL PRIMARY KEY,
+  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
+  seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(feed_id, catalog_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seen_items_feed ON seen_items(feed_id);
+CREATE INDEX IF NOT EXISTS idx_seen_items_catalog ON seen_items(catalog_item_id);
+
 -- Per-feed persisted queue (~6 items); refill when ≤3 remain
 CREATE TABLE IF NOT EXISTS queue_items (
   id SERIAL PRIMARY KEY,
