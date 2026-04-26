@@ -21,10 +21,27 @@ export async function recordInteraction(feedId, catalogItemId, type) {
 export async function getSeenCatalogIds(feedId) {
   const pool = await getDb();
   const result = await pool.query(
-    "SELECT catalog_item_id FROM interactions WHERE feed_id = $1",
+    `SELECT catalog_item_id FROM interactions WHERE feed_id = $1
+     UNION
+     SELECT catalog_item_id FROM seen_items WHERE feed_id = $1`,
     [feedId]
   );
   return result.rows.map((r) => r.catalog_item_id);
+}
+
+/**
+ * Mark an item as seen for a feed.
+ * @returns {Promise<boolean>} true when newly marked, false when already seen
+ */
+export async function markSeenCatalogItem(feedId, catalogItemId) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `INSERT INTO seen_items (feed_id, catalog_item_id) VALUES ($1, $2)
+     ON CONFLICT(feed_id, catalog_item_id) DO NOTHING
+     RETURNING id`,
+    [feedId, catalogItemId]
+  );
+  return result.rowCount > 0;
 }
 
 /**
@@ -35,9 +52,12 @@ export async function getSeenCatalogIds(feedId) {
 export async function getSeenSourceIds(feedId) {
   const pool = await getDb();
   const result = await pool.query(
-    `SELECT c.source, c.source_id FROM interactions i
-     INNER JOIN catalog c ON c.id = i.catalog_item_id
-     WHERE i.feed_id = $1`,
+    `SELECT c.source, c.source_id FROM catalog c
+     INNER JOIN (
+       SELECT catalog_item_id FROM interactions WHERE feed_id = $1
+       UNION
+       SELECT catalog_item_id FROM seen_items WHERE feed_id = $1
+     ) s ON s.catalog_item_id = c.id`,
     [feedId]
   );
   const set = new Set();
