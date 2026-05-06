@@ -13,10 +13,10 @@ import { config } from "dotenv";
 import { z } from "zod";
 import { getDb } from "./db/index.js";
 import { createUser, getUser, getUserByEmail, listUsers } from "./models/user.js";
-import { createFeed, getFeed, getFeedsByUser } from "./models/feed.js";
-import { getQueueSize, getNextAndDequeue } from "./models/queue.js";
+import { createFeed, getFeed, getFeedsByUser, updateLastBatchAt } from "./models/feed.js";
+import { getQueueSize, dequeueBatch } from "./models/queue.js";
 import { recordShown } from "./models/catalog.js";
-import { getSavedItems } from "./models/interaction.js";
+import { getSavedItems, getUninteractedSeenItems, markSeenBatch } from "./models/interaction.js";
 import { refillQueue } from "./services/refill.js";
 import { recordInteractionWithLearning } from "./services/feed-interactions.js";
 
@@ -788,7 +788,7 @@ app.get(
     config: { rateLimit: { max: RATE_LIMITS.FEED_NEXT_PER_MINUTE, timeWindow: "1 minute" } },
     schema: {
       tags: ["feeds"],
-      summary: "Get next item for feed",
+      summary: "Get next batch of items for feed",
       headers: authHeadersSchema,
       params: {
         type: "object",
@@ -797,34 +797,43 @@ app.get(
           feedId: { type: "integer", minimum: 1 },
         },
       },
+      querystring: {
+        type: "object",
+        properties: {
+          count: { type: "integer", minimum: 1, maximum: 20, default: 6 },
+        },
+      },
       response: {
         200: {
           type: "object",
-          required: ["item", "queueRemaining"],
+          required: ["items", "queueRemaining"],
           properties: {
-            item: {
-              type: "object",
-              required: [
-                "id",
-                "sourceId",
-                "source",
-                "title",
-                "imageUrl",
-                "priceCents",
-                "currency",
-                "buyUrl",
-                "tags",
-              ],
-              properties: {
-                id: { type: "number" },
-                sourceId: { type: "string" },
-                source: { type: "string" },
-                title: { type: "string" },
-                imageUrl: { type: ["string", "null"] },
-                priceCents: { type: ["number", "null"] },
-                currency: { type: ["string", "null"] },
-                buyUrl: { type: ["string", "null"] },
-                tags: { type: "array", items: { type: "string" } },
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                required: [
+                  "id",
+                  "sourceId",
+                  "source",
+                  "title",
+                  "imageUrl",
+                  "priceCents",
+                  "currency",
+                  "buyUrl",
+                  "tags",
+                ],
+                properties: {
+                  id: { type: "number" },
+                  sourceId: { type: "string" },
+                  source: { type: "string" },
+                  title: { type: "string" },
+                  imageUrl: { type: ["string", "null"] },
+                  priceCents: { type: ["number", "null"] },
+                  currency: { type: ["string", "null"] },
+                  buyUrl: { type: ["string", "null"] },
+                  tags: { type: "array", items: { type: "string" } },
+                },
               },
             },
             queueRemaining: { type: "number" },
@@ -842,8 +851,36 @@ app.get(
   },
   async (request, reply) => {
     const feedId = request.feed.id;
-    let item = await getNextAndDequeue(feedId);
-    if (!item) {
+    const count = request.query?.count ?? 6;
+
+    // ── Batch scroll-past detection ────────────────────────────────────
+    // Any items from the previous batch that the user saw but never
+    // explicitly interacted with are recorded as scroll_past.
+    const lastBatchAt = request.feed.last_batch_at;
+    if (lastBatchAt) {
+      try {
+        const scrolledPast = await getUninteractedSeenItems(feedId, lastBatchAt);
+        // recordInteractionWithLearning handles the insert + tag weight
+        // update atomically. ON CONFLICT means it's safe if a race
+        // condition somehow recorded an explicit action in the meantime.
+        for (const itemId of scrolledPast) {
+          try {
+            await recordInteractionWithLearning(feedId, itemId, "scroll_past");
+          } catch (_) {}
+        }
+      } catch (err) {
+        request.log.warn(
+          { feedId, message: err?.message },
+          "batch scroll-past detection failed"
+        );
+      }
+    }
+
+    // ── Dequeue a batch ────────────────────────────────────────────────
+    let items = await dequeueBatch(feedId, count);
+
+    // If queue was empty, try a refill then dequeue again.
+    if (items.length === 0) {
       try {
         await refillQueue(feedId);
       } catch (err) {
@@ -852,9 +889,10 @@ app.get(
           "initial refill failed"
         );
       }
-      item = await getNextAndDequeue(feedId);
+      items = await dequeueBatch(feedId, count);
     }
-    if (!item) {
+
+    if (items.length === 0) {
       return sendError(
         reply,
         404,
@@ -863,17 +901,33 @@ app.get(
       );
     }
 
-    await recordShown(item.id);
+    // Mark all items as shown + seen (for dedup and scroll-past tracking).
+    const itemIds = items.map((i) => i.id);
+    for (const item of items) {
+      await recordShown(item.id);
+    }
+    await markSeenBatch(feedId, itemIds);
+    await updateLastBatchAt(feedId);
+
     const remaining = await getQueueSize(feedId);
 
+    // Trigger background refill if queue is running low.
     if (remaining <= REFILL_THRESHOLD) {
       refillQueue(feedId).catch((err) => {
         request.log.warn({ msg: err?.message }, "background refill failed");
       });
     }
 
+    function parseTags(tags) {
+      if (Array.isArray(tags)) return tags;
+      if (typeof tags === "string") {
+        try { return JSON.parse(tags); } catch { return []; }
+      }
+      return [];
+    }
+
     return {
-      item: {
+      items: items.map((item) => ({
         id: item.id,
         sourceId: item.source_id,
         source: item.source,
@@ -882,18 +936,8 @@ app.get(
         priceCents: item.price_cents,
         currency: item.currency,
         buyUrl: item.buy_url,
-        tags: (() => {
-          if (Array.isArray(item.tags)) return item.tags;
-          if (typeof item.tags === "string") {
-            try {
-              return JSON.parse(item.tags);
-            } catch {
-              return [];
-            }
-          }
-          return [];
-        })(),
-      },
+        tags: parseTags(item.tags),
+      })),
       queueRemaining: remaining,
     };
   }
@@ -921,7 +965,7 @@ app.post(
         additionalProperties: false,
         properties: {
           catalogItemId: { type: "integer", minimum: 1 },
-          type: { type: "string", enum: ["like", "pass", "save"] },
+          type: { type: "string", enum: ["shop", "save", "dislike", "scroll_past", "like", "pass"] },
         },
       },
       response: {
@@ -945,7 +989,7 @@ app.post(
     const schema = z
       .object({
         catalogItemId: z.coerce.number().int().positive(),
-        type: z.enum(["like", "pass", "save"]),
+        type: z.enum(["shop", "save", "dislike", "scroll_past", "like", "pass"]),
       })
       .strict();
     const parsed = schema.safeParse(request.body ?? {});

@@ -164,6 +164,20 @@ export async function getSearchTermsForRefill(feedId, isInitial) {
   return Array.isArray(interests) ? interests : [];
 }
 
+/**
+ * Update last_batch_at to now. Called when a new batch is served.
+ * On the next batch request, items seen after this timestamp with no
+ * interaction are recorded as scroll_past.
+ */
+export async function updateLastBatchAt(feedId) {
+  const pool = await getDb();
+  await pool.query(
+    "UPDATE feeds SET last_batch_at = now() WHERE id = $1",
+    [feedId]
+  );
+  persistDb();
+}
+
 function parseFeedRow(row) {
   if (!row) return null;
   try {

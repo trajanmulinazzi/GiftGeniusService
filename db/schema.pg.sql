@@ -111,3 +111,30 @@ CREATE TABLE IF NOT EXISTS queue_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_queue_items_feed ON queue_items(feed_id);
+
+-- ============================================================
+-- V2 Migration: recommendation engine architecture changes
+-- ============================================================
+
+-- Tracks when the last batch was served for this feed.
+-- On next batch request, items in seen_items after this timestamp with no
+-- interaction are bulk-recorded as scroll_past.
+ALTER TABLE feeds ADD COLUMN IF NOT EXISTS last_batch_at TIMESTAMPTZ;
+
+-- Expand interaction types: shop (buy click), dislike (active rejection),
+-- scroll_past (implicit — user scrolled without acting).
+-- Postgres doesn't support ALTER CHECK directly, so drop + re-add.
+DO $$
+BEGIN
+  -- Drop the old CHECK if it exists (safe if already dropped).
+  ALTER TABLE interactions DROP CONSTRAINT IF EXISTS interactions_type_check;
+  -- Add the new CHECK covering all five types.
+  ALTER TABLE interactions ADD CONSTRAINT interactions_type_check
+    CHECK (type IN ('like', 'pass', 'save', 'shop', 'dislike', 'scroll_past'));
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+-- GIN index on catalog tags (cast to jsonb) for cache-first candidate queries.
+-- Enables: WHERE tags::jsonb ?| ARRAY['outdoor','coffee']
+CREATE INDEX IF NOT EXISTS idx_catalog_tags_gin ON catalog USING gin ((tags::jsonb));

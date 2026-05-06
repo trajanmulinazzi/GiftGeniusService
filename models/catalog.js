@@ -108,7 +108,7 @@ export async function recordShown(catalogItemId) {
 }
 
 /**
- * Increment times_liked when a user likes a catalog item.
+ * Increment times_liked when a user likes/shops a catalog item.
  */
 export async function incrementTimesLiked(catalogItemId) {
   const pool = await getDb();
@@ -116,4 +116,52 @@ export async function incrementTimesLiked(catalogItemId) {
     `UPDATE catalog SET times_liked = times_liked + 1 WHERE id = $1`,
     [catalogItemId]
   );
+}
+
+/**
+ * Cache-first candidate query: find unseen catalog items matching any of the
+ * given tags, within budget, excluding items already seen/queued for this feed.
+ * @param {number} feedId
+ * @param {string[]} tags - canonical tags to match (OR logic)
+ * @param {{ budgetMinCents?: number, budgetMaxCents?: number, limit?: number }} opts
+ * @returns {Promise<object[]>} catalog rows
+ */
+export async function getUnseenCandidates(feedId, tags, opts = {}) {
+  if (!tags?.length) return [];
+  const pool = await getDb();
+  const limit = opts.limit ?? 20;
+  const params = [tags, feedId];
+  let idx = 3;
+
+  let budgetClause = "";
+  if (opts.budgetMinCents != null) {
+    budgetClause += ` AND (c.price_cents IS NULL OR c.price_cents >= $${idx})`;
+    params.push(opts.budgetMinCents);
+    idx++;
+  }
+  if (opts.budgetMaxCents != null) {
+    budgetClause += ` AND (c.price_cents IS NULL OR c.price_cents <= $${idx})`;
+    params.push(opts.budgetMaxCents);
+    idx++;
+  }
+
+  params.push(limit);
+
+  const sql = `
+    SELECT c.* FROM catalog c
+    WHERE c.active = 1
+      AND c.tags::jsonb ?| $1
+      AND c.id NOT IN (
+        SELECT catalog_item_id FROM interactions WHERE feed_id = $2
+        UNION
+        SELECT catalog_item_id FROM seen_items WHERE feed_id = $2
+        UNION
+        SELECT catalog_item_id FROM queue_items WHERE feed_id = $2
+      )
+      ${budgetClause}
+    ORDER BY c.last_refreshed DESC NULLS LAST
+    LIMIT $${idx}
+  `;
+  const result = await pool.query(sql, params);
+  return result.rows;
 }

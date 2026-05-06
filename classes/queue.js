@@ -7,10 +7,9 @@ import { intro, select, spinner, isCancel, cancel } from "@clack/prompts";
 import { appendFile } from "fs/promises";
 import { join } from "path";
 import { refillQueue } from "../services/refill.js";
-import { recordInteraction } from "../models/interaction.js";
 import { recordShown } from "../models/catalog.js";
-import { getFeed, updateTagWeights } from "../models/feed.js";
-import { updateTagWeightsFromInteraction } from "../services/ranking.js";
+import { getFeed } from "../models/feed.js";
+import { recordInteractionWithLearning } from "../services/feed-interactions.js";
 import { getNextAndDequeue, getQueueSize } from "../models/queue.js";
 
 const REFILL_THRESHOLD = 3;
@@ -76,18 +75,7 @@ export class Queue {
         return;
       }
 
-      await recordInteraction(this.feedId, item.id, choice);
-      const feed = await getFeed(this.feedId);
-      const tags =
-        typeof item.tags === "string"
-          ? JSON.parse(item.tags || "[]")
-          : item.tags || [];
-      const nextWeights = updateTagWeightsFromInteraction(
-        feed?.tag_weights || {},
-        tags,
-        choice
-      );
-      await updateTagWeights(this.feedId, nextWeights);
+      await recordInteractionWithLearning(this.feedId, item.id, choice);
 
       const remaining = await getQueueSize(this.feedId);
       if (remaining <= REFILL_THRESHOLD && !this.backgroundRefill) {
@@ -114,9 +102,9 @@ export class Queue {
     const choice = await select({
       message,
       options: [
-        { value: "like", label: "Like", hint: "I like this" },
-        { value: "pass", label: "Pass", hint: "Not for me" },
+        { value: "shop", label: "Shop", hint: "Open the product page" },
         { value: "save", label: "Save", hint: "Save for later" },
+        { value: "dislike", label: "Dislike", hint: "Not for me" },
       ],
     });
 

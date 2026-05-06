@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS catalog (
   currency TEXT DEFAULT 'USD',
   buy_url TEXT,
   tags TEXT NOT NULL DEFAULT '[]',
+  rating REAL,
+  reviews_count INTEGER,
   active INTEGER NOT NULL DEFAULT 1,
   last_refreshed TEXT,
   created_at TEXT DEFAULT (datetime('now')),
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS feeds (
   budget_max REAL,
   occasion TEXT,
   tag_weights TEXT NOT NULL DEFAULT '{}',
+  last_batch_at TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -57,7 +60,7 @@ CREATE TABLE IF NOT EXISTS interactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   feed_id INTEGER NOT NULL,
   catalog_item_id INTEGER NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('like', 'pass', 'save')),
+  type TEXT NOT NULL CHECK (type IN ('like', 'pass', 'save', 'shop', 'dislike', 'scroll_past')),
   created_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (feed_id) REFERENCES feeds(id),
   FOREIGN KEY (catalog_item_id) REFERENCES catalog(id),
@@ -66,4 +69,26 @@ CREATE TABLE IF NOT EXISTS interactions (
 
 CREATE INDEX IF NOT EXISTS idx_interactions_feed ON interactions(feed_id);
 CREATE INDEX IF NOT EXISTS idx_interactions_catalog ON interactions(catalog_item_id);
+
+-- Seen items: records which catalog items were already served to a feed.
+CREATE TABLE IF NOT EXISTS seen_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
+  seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(feed_id, catalog_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seen_items_feed ON seen_items(feed_id);
+CREATE INDEX IF NOT EXISTS idx_seen_items_catalog ON seen_items(catalog_item_id);
+
+-- Per-feed persisted queue (~6 items); refill when <=3 remain
+CREATE TABLE IF NOT EXISTS queue_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_items_feed ON queue_items(feed_id);
 `;

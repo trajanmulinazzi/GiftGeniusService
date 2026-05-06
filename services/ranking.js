@@ -1,24 +1,43 @@
 /**
  * Ranking service - deterministic scoring of catalog items for a feed
- * Score = sum(tag weights) + explicit-interest bonuses - penalties
+ * Score = sum(tag weights) + explicit-interest bonus + freshness bonus - oversaturation penalty
+ *
+ * Interaction signal strengths:
+ *   shop        +2.0  (user clicked to buy — strongest positive)
+ *   save        +1.5  (user bookmarked for later)
+ *   like        +1.0  (legacy positive — kept for backward compat)
+ *   scroll_past -0.25 (implicit — user scrolled without acting)
+ *   pass        -0.5  (legacy mild negative)
+ *   dislike     -1.0  (active rejection)
  */
 
-const LIKE_WEIGHT_DELTA = 1;
-const PASS_WEIGHT_DELTA = -0.5;
+const WEIGHT_DELTAS = {
+  shop: 2.0,
+  save: 1.5,
+  like: 1.0,
+  scroll_past: -0.25,
+  pass: -0.5,
+  dislike: -1.0,
+};
+
 const EXPLICIT_INTEREST_BONUS = 2;
+const FRESHNESS_BONUS = 0.5;
+const FRESHNESS_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const OVERSATURATION_PENALTY = 1;
+const OVERSATURATION_WINDOW = 5; // look at last N shown items
 
 /**
  * Update feed tag weights based on an interaction.
  * @param {Object} tagWeights - current { tag: weight } map
  * @param {string[]} itemTags - tags of the item interacted with
- * @param {'like'|'pass'|'save'} type - interaction type
+ * @param {string} type - interaction type (shop/save/like/dislike/pass/scroll_past)
  * @returns {Object} updated tag weights
  */
 export function updateTagWeightsFromInteraction(tagWeights, itemTags, type) {
   const next = { ...tagWeights };
   if (!itemTags?.length) return next;
 
-  const delta = type === "like" || type === "save" ? LIKE_WEIGHT_DELTA : PASS_WEIGHT_DELTA;
+  const delta = WEIGHT_DELTAS[type] ?? 0;
 
   for (const tag of itemTags) {
     const t = String(tag).toLowerCase();
@@ -45,12 +64,13 @@ function getItemTags(item) {
 
 /**
  * Score a single catalog item for a feed.
- * @param {Object} item - catalog item with tags
+ * @param {Object} item - catalog item with tags, last_refreshed
  * @param {Object} tagWeights - feed's tag weights
- * @param {string[]} explicitInterests - feed's explicit interests (e.g. hobbies)
+ * @param {string[]} explicitInterests - feed's explicit interests
+ * @param {Set<string>} [recentTags] - tags from recently shown items (for oversaturation)
  * @returns {number} score
  */
-export function scoreItem(item, tagWeights, explicitInterests = []) {
+export function scoreItem(item, tagWeights, explicitInterests = [], recentTags = new Set()) {
   const itemTags = getItemTags(item).map((t) => String(t).toLowerCase());
   const interestSet = new Set(
     (explicitInterests || []).map((i) => String(i).toLowerCase())
@@ -70,6 +90,21 @@ export function scoreItem(item, tagWeights, explicitInterests = []) {
     }
   }
 
+  // Freshness bonus: items fetched/refreshed in last 24h get a bump
+  if (item.last_refreshed) {
+    const refreshed = new Date(item.last_refreshed).getTime();
+    if (Date.now() - refreshed < FRESHNESS_WINDOW_MS) {
+      score += FRESHNESS_BONUS;
+    }
+  }
+
+  // Oversaturation penalty: tags that appeared in recently shown items get penalized
+  for (const tag of itemTags) {
+    if (recentTags.has(tag)) {
+      score -= OVERSATURATION_PENALTY;
+    }
+  }
+
   return score;
 }
 
@@ -77,14 +112,24 @@ export function scoreItem(item, tagWeights, explicitInterests = []) {
  * Rank a list of catalog items for a feed.
  * @param {Object[]} items - catalog items
  * @param {Object} feed - feed with tag_weights and interests
+ * @param {Object[]} [recentItems] - last N items shown (for oversaturation)
  * @returns {Object[]} items sorted by score descending
  */
-export function rankItems(items, feed) {
+export function rankItems(items, feed, recentItems = []) {
   const tagWeights = feed.tag_weights || {};
   const interests = feed.interests || [];
+
+  // Build set of tags from recently shown items for oversaturation check
+  const recentTags = new Set();
+  for (const ri of recentItems.slice(-OVERSATURATION_WINDOW)) {
+    for (const tag of getItemTags(ri)) {
+      recentTags.add(String(tag).toLowerCase());
+    }
+  }
+
   const scored = items.map((item) => ({
     item,
-    score: scoreItem(item, tagWeights, interests),
+    score: scoreItem(item, tagWeights, interests, recentTags),
   }));
   scored.sort((a, b) => b.score - a.score);
   return scored.map((s) => s.item);

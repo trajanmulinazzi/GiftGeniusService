@@ -39,6 +39,34 @@ export async function getNextAndDequeue(feedId) {
 }
 
 /**
+ * Dequeue up to `count` items from the feed's queue (atomic).
+ * Returns full catalog rows in queue order.
+ * @param {number} feedId
+ * @param {number} count
+ * @returns {Promise<object[]>} catalog rows
+ */
+export async function dequeueBatch(feedId, count) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `DELETE FROM queue_items
+     WHERE id IN (
+       SELECT id FROM queue_items WHERE feed_id = $1 ORDER BY id ASC LIMIT $2
+     )
+     RETURNING catalog_item_id`,
+    [feedId, count]
+  );
+  if (result.rows.length === 0) return [];
+  persistDb();
+  const ids = result.rows.map((r) => r.catalog_item_id);
+  const items = [];
+  for (const id of ids) {
+    const item = await getProductById(id);
+    if (item) items.push(item);
+  }
+  return items;
+}
+
+/**
  * Append catalog item ids to the feed's queue (in order).
  * @param {number} feedId
  * @param {number[]} catalogItemIds

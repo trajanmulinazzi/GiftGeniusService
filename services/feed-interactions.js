@@ -27,9 +27,14 @@ function parseTags(value) {
   return [];
 }
 
+const EXPLICIT_TYPES = new Set(["shop", "save", "dislike", "like", "pass"]);
+
 /**
  * Atomically records an interaction and updates feed learning state.
- * This prevents partial writes where interaction is stored but tag weights are not.
+ * Supports: shop, save, dislike, scroll_past (plus legacy like/pass).
+ *
+ * For explicit interactions (shop/save/dislike), also clears
+ * last_shown_item_id since the user acted on the item.
  */
 export async function recordInteractionWithLearning(feedId, catalogItemId, type) {
   const pool = await getDb();
@@ -63,7 +68,7 @@ export async function recordInteractionWithLearning(feedId, catalogItemId, type)
       [feedId, catalogItemId, type]
     );
 
-    if (type === "like") {
+    if (type === "like" || type === "shop") {
       await client.query(
         "UPDATE catalog SET times_liked = times_liked + 1 WHERE id = $1",
         [catalogItemId]

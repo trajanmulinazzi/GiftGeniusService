@@ -6,120 +6,181 @@ Buying gifts is stressful and time-consuming, and generic guides don't adapt as 
 
 ## Solution
 
-This app acts like a personalized gift discovery tool. Instead of searching endlessly, users swipe through gift ideas the way they'd browse a dating app. Each swipe teaches the app what is and isn't right, allowing it to narrow in on better options quickly. Users can create separate feeds for different people in their life, so gift ideas feel tailored and intentional rather than random.
+This app acts like a personalized gift discovery tool. Users scroll through gift ideas in a feed-style format. Each action — shopping, saving, disliking, or simply scrolling past — teaches the engine what is and isn't right, allowing it to narrow in on better options quickly. Users can create separate profiles for different people in their life, so gift ideas feel tailored and intentional.
 
 ## Vision
 
 GiftGenius Engine is a **gift recommendation system** that:
 
-- Uses **real, purchasable products** from retailer APIs (e.g. Amazon Creators API) instead of a pre-stored full catalog.
-- Keeps a **short queue** of about 6 items per feed; when the queue drops to **3 items**, the system fetches more by calling the Amazon Creator API using the **top tags** associated with the current feed.
-- **Learns from feedback** (like / pass / save) via tag weights and explicit interests—no ML training, fully deterministic and explainable.
-- Stays **monetizable** by driving traffic to affiliate links (e.g. Amazon Associates) via `buy_url` and partner tags.
-- Lets users create a **profile** and **specific feeds for each of their relationships**; almost everything else (interactions, ranking, tag weights) stays the same.
-- Currently runs as a **CLI first**; in the end this will serve as the backend for a frontend that displays each item.
-
-The goal is to give gift-givers a focused, fast way to browse and save ideas for specific people (Mom, Partner, Coworker) with a budget and interests in mind, while the system gets better at showing relevant items over time—without maintaining a large stored catalog.
+- Uses **real, purchasable products** from retailer APIs (Amazon Creators API primary, Canopy API fallback).
+- Employs a **two-tier data sourcing model**: a catalog cache (Postgres) is queried first; the API is only called when the cache can't fill the queue. Every API response is fully upserted to the cache so future refills across all feeds benefit.
+- Keeps a **short queue** of ~6 items per feed; when the queue drops to **≤3 items**, the system refills from cache first, then API if needed.
+- **Learns from feedback** (shop / save / dislike / scroll-past) via tag weights — fully deterministic and explainable, no ML.
+- Stays **monetizable** via affiliate links (Amazon Associates) on every `buy_url`.
+- Lets users create a **profile** and **specific feeds for each relationship**; tag weights and interactions are feed-scoped.
+- Runs as both a **CLI** and a **Fastify REST API** for frontend clients.
 
 ---
 
-## What We're Building (Short-Queue, On-Demand Model)
+## Core Stack
 
-### Core stack
+- **Runtime:** Node.js (ES modules)
+- **Data:** PostgreSQL (Docker); schema in `db/schema.pg.sql`
+- **API:** Fastify with JWT auth, CORS, rate limiting, Swagger docs
+- **CLI:** `@clack/prompts` for interactive use
 
-- **Runtime:** Node.js (ES modules).
-- **Data:** PostgreSQL (Docker); schema in `db/schema.pg.sql`.
-- **CLI:** `@clack/prompts` for user/feed selection and the product queue.
+---
 
-### Main pieces
+## Two-Tier Data Sourcing
+
+This is the key architectural decision. Product data flows through two tiers:
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Tier 1: Catalog Cache (Postgres)                    │
+│  All items ever fetched, with last_refreshed         │
+│  Query: unseen items matching top tags + budget      │
+│  → If enough candidates exist, zero API calls        │
+└──────────────────────┬───────────────────────────────┘
+                       │ cache miss (< 6 candidates)
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│  Tier 2: Amazon Creator API (8640 req/day)           │
+│  Called only when cache can't fill the queue          │
+│  ALL results upserted to cache (not just picks)      │
+│  Canopy API is the fallback when Amazon unavailable  │
+└──────────────────────────────────────────────────────┘
+```
+
+### Cross-feed cache sharing
+
+Items fetched for "Mom who likes hiking" also serve "Dad who likes hiking." The catalog is shared; only seen-item tracking and tag weights are per-feed. Every API call multiplies in value.
+
+### Cache freshness
+
+- Items with `last_refreshed` in the last 24h get a freshness bonus in ranking.
+- Items are re-upserted (price/availability updated) whenever the API returns them again during a refill.
+
+---
+
+## Recommendation Engine
+
+### Interaction signals
+
+Users have four actions, each with a different learning weight per tag on the item:
+
+| Action | Tag Weight Delta | Description |
+|--------|-----------------|-------------|
+| **Shop** | +2.0 | User clicked to buy — strongest positive signal |
+| **Save** | +1.5 | User bookmarked for later |
+| **Scroll-past** | −0.25 | Implicit — user scrolled without acting (auto-detected) |
+| **Dislike** | −1.0 | Active rejection |
+
+Legacy types `like` (+1.0) and `pass` (−0.5) remain for backward compatibility.
+
+### Batch serving and scroll-past detection
+
+`GET /feeds/:feedId/next?count=6` returns a batch of items. The client displays them as a card stack or feed, and sends interactions individually as the user acts.
+
+When the next batch is requested:
+1. Server queries `seen_items LEFT JOIN interactions` for items seen after `last_batch_at` with no explicit interaction.
+2. Those items are recorded as `scroll_past` (with tag weight updates).
+3. A new batch is dequeued, all items are marked as seen, and `last_batch_at` is updated.
+
+The frontend never needs to send scroll-past events — it's fully automatic.
+
+### Scoring formula
+
+```
+score = Σ(tag_weight[tag])
+      + explicit_interest_bonus  (+2 per tag matching feed interests)
+      + freshness_bonus          (+0.5 if item refreshed in last 24h)
+      - oversaturation_penalty   (-1 per tag seen in last 5 shown items)
+```
+
+### How learning flows
+
+```
+User scrolls/acts on item
+        ↓
+Record interaction (shop/save/dislike/scroll_past)
+        ↓
+Update feed tag_weights with deltas above
+        ↓
+Tag weights shift → top tags change → next refill uses new search terms
+        ↓
+Better items appear in queue
+```
+
+---
+
+## Refill Logic
+
+```
+refill(feedId):
+  1. Get feed's top tags (from tag_weights) + budget
+  2. Tier 1: Query catalog for unseen items matching those tags within budget
+  3. If cache has enough candidates (≥ slots needed):
+       → Rank, apply diversity cap, fill queue. Zero API calls.
+  4. If cache is thin:
+       → Call Amazon API (Canopy fallback) with top tags
+       → Upsert ALL results into catalog
+       → Merge cached + fresh candidates
+       → Rank combined pool, diversity cap, fill queue
+  5. If still short → relationship fallback term ("gifts for mom")
+```
+
+### Queue parameters
+
+- **Queue size (target):** ~6 items
+- **Refill threshold:** ≤3 items triggers refill
+- **Diversity cap:** max 2 items per tag in a single refill batch
+
+---
+
+## Main Pieces
 
 | Layer | What it does |
-|-------|----------------|
+|-------|-------------|
 | **Users** | App users (gift-givers). One user can have many feeds. |
-| **Feeds** | One feed per recipient (name, relationship, budget, interests). Each feed has its own tag weights and interaction history. **Top tags** (from tag weights + interests) drive the next API search when the queue needs refilling. |
-| **Short queue** | Per-feed queue of **~6 items**, **persisted** in the DB so returning users see the same queue. User sees one item at a time. When **≤3 items** remain, a **refill** runs: call API (Amazon primary, Canopy fallback) with top tags or interests, get items, filter out already-seen ASINs, rank, upsert into catalog, append to queue. Only call the API again in the same refill if after filtering the queue would still be below 3. |
-| **Catalog (cache)** | No longer a large pre-ingested inventory. Every item fetched during refill is **upserted** into the catalog so we have stable IDs for interactions and saved items. Refill does **not** read from catalog for candidates; it fetches live from the API (Amazon primary, Canopy fallback). |
-| **Interactions** | Stored like/pass/save per feed and catalog item (same as today). Used to update feed tag weights and to exclude already-seen items when refilling. |
-| **Refill** | **New behavior:** Call **Amazon Creator API** (fallback: **Canopy API**) with search terms from the feed’s **top tags** or **explicit interests**. Map API results to catalog shape; **filter out already-seen ASINs**; only call the API again in the same refill if after filtering the queue would still be below 3. Rank; **upsert every item into catalog**; return top N and append to **persisted** queue. |
-| **Ranking** | Unchanged: deterministic score = sum of tag weights + bonus for tags matching feed interests. Like/Save +1 per tag, Pass −0.5 per tag. |
-
-### Queue and refill parameters
-
-- **Queue size (target):** ~6 items.
-- **Refill threshold:** 3 items (trigger refill when queue has ≤3 items left).
-- **Refill batch size:** Enough to bring queue back to ~6 (e.g. fetch 6 from API, filter/rank, add up to 6).
-
-### How products get into the queue (no bulk ingest for recommendation)
-
-- **Initial load:** The user is required to list **hobbies and interests** for the feed. The first refill calls the API (Amazon Creator primary, Canopy fallback) using the feed’s **explicit interests** as search terms. Results are filtered by budget and already-seen ASINs, **upserted into catalog**, ranked, and used to fill the persisted queue.
-- **Subsequent refills:** When the queue has ≤3 items, refill calls the API with the feed’s **top tags** (from tag weights + interests). Same flow: fetch → filter already-seen ASINs → only call API again if queue would still be below 3 after filtering → rank → upsert every item into catalog → append to queue.
-- **Already-seen:** Filter out ASINs we have already seen for this feed; do not call the API a second time in the same refill unless the queue would still be below 3 after filtering.
-- **Catalog:** Every fetched item is **upserted into the catalog** so we have stable IDs for interactions and saved lists. Refill does not read from catalog for candidates.
-- **API choice:** **Amazon Creator API** is primary for refill; **Canopy API** is the fallback when Amazon is unavailable.
-
-### Scripts and ops (aligned with new model)
-
-- **List catalog:** `npm run list-catalog [N]` — print recent catalog rows (cached items).
-- **DB migrate:** `npm run db:migrate` — apply `db/schema.pg.sql`.
-- **Optional ingest:** If we keep ingest scripts (e.g. for backfill or admin), they remain separate from the refill path; refill always uses the live API with top tags.
+| **Feeds** | One feed per recipient (name, relationship, budget, interests). Each feed has its own tag weights, interaction history, and `last_batch_at` for scroll-past tracking. Top tags drive the next refill search. |
+| **Short queue** | Per-feed queue of ~6 items, persisted in `queue_items` table. User sees one item at a time. Refill triggers at ≤3 remaining. |
+| **Catalog (cache)** | Every item fetched during any refill is upserted here. Cache-first queries check this table before calling the API. Items have `last_refreshed` for freshness tracking. |
+| **Interactions** | Stored shop/save/dislike/scroll_past per feed and catalog item. Used to update feed tag weights and to exclude already-seen items. |
+| **Refill** | Two-tier: cache first, then API. Upserts ALL API results. Ranks combined pool with diversity cap. |
+| **Ranking** | Deterministic score = tag weights + interest bonus + freshness − oversaturation. |
 
 ---
 
-## How It Should Work
-
-### End-to-end flow
-
-1. **User starts the app** (`npm start`). Chooses or creates a **user**, then chooses or creates a **feed** (who the gift is for, budget, **required** hobbies/interests).
-2. **Initial refill:** Refill calls the **API** (Amazon Creator primary, Canopy fallback) with the feed’s **explicit interests** as search terms. Gets items, filters by budget and already-seen ASINs, upserts every item into catalog, ranks, and enqueues up to ~6 items into the **persisted** queue.
-3. **User sees one product at a time** (title, price, link). Actions: **Like**, **Pass**, or **Save**.
-4. **Each action** is stored as an interaction and updates that feed’s **tag weights** (e.g. tags on a liked item get +1, on a passed item −0.5).
-5. **When the queue has ≤3 items**, a background refill runs: call API with the feed’s **top tags**, get items, filter out already-seen ASINs (call API again only if queue would still be below 3 after filtering), rank, upsert into catalog, append to the persisted queue. The user keeps going without waiting.
-6. **Catalog** is populated by refill (every fetched item is upserted); refill does not read from catalog to build the candidate set—it always fetches from the API.
-
-### Data flow (simplified)
-
-```
-User/Feed selection (CLI)
-        ↓
-Queue ← Refill (API: Amazon / Canopy → filter already-seen → rank → upsert all to catalog → top N → persisted queue)
-        ↓
-User: Like / Pass / Save
-        ↓
-Interaction stored → tag weights updated
-        ↓
-Queue low (≤3)? → Refill again (API + top tags, repeat)
-```
-
-### Design choices
-
-- **Short queue, on-demand API:** Recommendation is driven by a **persisted** queue of ~6 items. When ≤3 remain, we call the API (Amazon Creator primary, Canopy fallback) with the feed’s top tags or explicit interests. No dependency on a large pre-stored catalog for the main loop.
-- **Catalog upsert:** Every item fetched from the API is **upserted into the catalog** so we have stable IDs for interactions and for displaying saved items. Refill does not pull “candidates” from the catalog.
-- **Top tags drive search:** The feed’s tag weights (and explicit interests) define “top tags”; refill turns these into search terms for the API so results stay relevant to what the user has liked.
-- **Feed-scoped learning:** Tag weights and seen-item exclusion are per feed, so “gift for Mom” and “gift for Dad” learn separately and each feed’s top tags drive its own API calls.
-- **Affiliate links:** Every item we show has a `buy_url` with the partner tag; we set it when mapping API responses to our shape.
-
----
-
-## File map (high level)
+## File Map
 
 | Area | Path | Role |
 |------|------|------|
-| Entry | `index.js` | User/feed prompts, start queue |
-| Queue UX | `classes/queue.js` | Loop: show item from persisted queue, handle Like/Pass/Save, trigger refill when ≤3 items; queue size ~6 |
-| Refill | `services/refill.js` | Call API (Amazon primary, Canopy fallback) with top tags or interests; filter already-seen ASINs; only re-call if queue still &lt;3; rank; upsert all to catalog; return batch; append to persisted queue |
-| Ranking | `services/ranking.js` | Score items, update tag weights (unchanged) |
-| Catalog API (primary) | `services/amazon-api.js` | Amazon Creators API: search by keywords, map to catalog shape (used by refill) |
-| Catalog API (fallback) | `services/canopy-api.js` | Canopy: used by refill when Amazon is unavailable |
-| Data | `models/catalog.js`, `models/feed.js`, `models/interaction.js`, `models/user.js` | CRUD and queries; feed model exposes “top tags” for refill |
-| Schema | `db/schema.pg.sql`, `db/index.js` | Postgres schema and pool (catalog remains for cache + interactions) |
-| Ingest (optional) | `scripts/ingest-catalog.js`, `data/gift-keywords.js` | Optional seed/backfill; not used by refill loop |
+| Entry (CLI) | `index.js` | User/feed prompts, start queue |
+| Entry (API) | `server.js` | Fastify server, all REST routes, JWT auth, scroll-past detection |
+| Queue UX | `classes/queue.js` | CLI loop: show item, handle Shop/Save/Dislike, trigger refill |
+| Refill | `services/refill.js` | Two-tier sourcing: cache-first → API fallback → rank → enqueue |
+| Ranking | `services/ranking.js` | Score items, update tag weights (shop/save/dislike/scroll_past) |
+| Interactions | `services/feed-interactions.js` | Atomic interaction recording + tag weight update in one transaction |
+| Amazon API | `services/amazon-api.js` | Amazon Creators API: search by keywords, map to catalog shape |
+| Canopy API | `services/canopy-api.js` | Canopy: fallback when Amazon unavailable |
+| Catalog model | `models/catalog.js` | CRUD, upsert, `getUnseenCandidates()` for cache-first queries |
+| Feed model | `models/feed.js` | CRUD, tag weights, search terms for refill, `last_batch_at` |
+| Interaction model | `models/interaction.js` | Record interactions, get seen source IDs |
+| Queue model | `models/queue.js` | Append/dequeue from persisted queue |
+| User model | `models/user.js` | User CRUD |
+| Tag taxonomy | `data/tag-canonical.js` | Raw word → canonical tag mapping |
+| Schema | `db/schema.pg.sql` | Postgres DDL + migrations |
+| DB pool | `db/index.js` | Postgres connection pool |
 
-This document should stay aligned with the README and `.cursorrules` so new code and docs follow the same vision and patterns.
+---
 
-### Decided behavior
+## Decided Behavior
 
-- **Already-seen:** Filter out ASINs already seen for this feed from each API page; only call the API again in the same refill if after filtering the queue would still be below 3.
-- **First load:** Use the feed’s **explicit interests** as search terms; the user is required to list hobbies and interests for the feed.
-- **Queue:** **Persisted** in the DB so returning users see the same queue.
-- **API:** **Amazon Creator API** is primary for refill; **Canopy API** is the fallback when Amazon is unavailable.
-- **Catalog:** **Upsert every item** fetched during refill into the catalog so all interactions have a `catalog_item_id`.
+- **Scroll-past:** Auto-detected via `last_batch_at` on `/next` calls. No client action needed.
+- **First load:** Uses the feed's explicit interests as search terms.
+- **Subsequent refills:** Uses top tag weights (learned from interactions).
+- **Cache-first:** Catalog is queried before any API call. API results are fully upserted so all feeds benefit.
+- **API:** Amazon Creator API primary; Canopy API fallback.
+- **Diversity:** Max 2 items per tag per refill batch, with backfill from ranked leftovers.
+- **Queue:** Persisted in DB so returning users see the same queue.

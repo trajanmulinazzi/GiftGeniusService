@@ -67,6 +67,69 @@ export async function getSeenSourceIds(feedId) {
   return set;
 }
 
+/**
+ * Find seen items that have no explicit interaction (candidates for scroll_past).
+ * @param {number} feedId
+ * @param {string|null} since - ISO timestamp; only check items seen after this time (null = all)
+ * @returns {Promise<number[]>} catalog_item_ids with no interaction
+ */
+export async function getUninteractedSeenItems(feedId, since) {
+  const pool = await getDb();
+  const params = [feedId];
+  let sinceClause = "";
+  if (since) {
+    sinceClause = " AND si.seen_at >= $2";
+    params.push(since);
+  }
+  const result = await pool.query(
+    `SELECT si.catalog_item_id
+     FROM seen_items si
+     LEFT JOIN interactions i
+       ON i.feed_id = si.feed_id AND i.catalog_item_id = si.catalog_item_id
+     WHERE si.feed_id = $1${sinceClause}
+       AND i.id IS NULL`,
+    params
+  );
+  return result.rows.map((r) => r.catalog_item_id);
+}
+
+/**
+ * Bulk-insert scroll_past interactions for items the user scrolled past.
+ * Uses ON CONFLICT to skip items that somehow got an interaction in the meantime.
+ * @param {number} feedId
+ * @param {number[]} catalogItemIds
+ */
+export async function recordScrollPastBatch(feedId, catalogItemIds) {
+  if (!catalogItemIds?.length) return;
+  const pool = await getDb();
+  for (const id of catalogItemIds) {
+    await pool.query(
+      `INSERT INTO interactions (feed_id, catalog_item_id, type) VALUES ($1, $2, 'scroll_past')
+       ON CONFLICT(feed_id, catalog_item_id) DO NOTHING`,
+      [feedId, id]
+    );
+  }
+  persistDb();
+}
+
+/**
+ * Mark multiple items as seen for a feed (batch insert for served batches).
+ * @param {number} feedId
+ * @param {number[]} catalogItemIds
+ */
+export async function markSeenBatch(feedId, catalogItemIds) {
+  if (!catalogItemIds?.length) return;
+  const pool = await getDb();
+  for (const id of catalogItemIds) {
+    await pool.query(
+      `INSERT INTO seen_items (feed_id, catalog_item_id) VALUES ($1, $2)
+       ON CONFLICT(feed_id, catalog_item_id) DO NOTHING`,
+      [feedId, id]
+    );
+  }
+  persistDb();
+}
+
 export async function getInteractionsForFeed(feedId) {
   const pool = await getDb();
   const result = await pool.query(

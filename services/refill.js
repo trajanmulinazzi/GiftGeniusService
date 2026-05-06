@@ -1,6 +1,15 @@
 /**
- * Refill service - fetches items from Amazon Creator API (fallback: Canopy),
- * filters already-seen and budget, upserts to catalog, ranks, appends to persisted queue.
+ * Refill service — two-tier data sourcing:
+ *
+ * Tier 1 (cache):  Query the catalog for unseen items matching the feed's top
+ *                  tags + budget.  If enough candidates exist, skip the API entirely.
+ *
+ * Tier 2 (API):    When cache can't fill the queue, call Amazon Creator API
+ *                  (fallback: Canopy).  ALL results are upserted into the catalog
+ *                  so future refills for any feed can reuse them.
+ *
+ * After combining cached + freshly-fetched items, rank them with the feed's
+ * tag weights, apply a diversity cap, and append to the persisted queue.
  */
 
 import { appendFile } from "fs/promises";
@@ -9,7 +18,11 @@ import * as amazonApi from "./amazon-api.js";
 import * as canopyApi from "./canopy-api.js";
 import { getFeed, getSearchTermsForRefill } from "../models/feed.js";
 import { getSeenSourceIds } from "../models/interaction.js";
-import { upsertProduct, getProductsByIds } from "../models/catalog.js";
+import {
+  upsertProduct,
+  getProductsByIds,
+  getUnseenCandidates,
+} from "../models/catalog.js";
 import { appendToQueue, getQueueSize } from "../models/queue.js";
 import { rankItems } from "./ranking.js";
 import { normalizeTags } from "../data/tag-canonical.js";
@@ -38,9 +51,7 @@ async function logRefill(message, detail = null) {
 }
 
 /**
- * Build budget options for API calls (min/max in cents, from feed dollars).
- * @param {Object} feed - feed with budget_min, budget_max (dollars)
- * @returns {{ budgetMinCents?: number, budgetMaxCents?: number }}
+ * Build budget options (cents) from feed (dollars).
  */
 function budgetOpts(feed) {
   const opts = {};
@@ -53,10 +64,6 @@ function budgetOpts(feed) {
 
 /**
  * Fetch products from API: try Amazon first, fallback to Canopy.
- * Uses feed's min/max budget when calling the API so results are pre-filtered by price.
- * @param {string} searchTerm
- * @param {Object} feed - feed with budget_min, budget_max (dollars)
- * @returns {Promise<{ products: object[], source: 'amazon'|'canopy' }>}
  */
 async function fetchFromApi(searchTerm, feed) {
   const budget = budgetOpts(feed || {});
@@ -117,26 +124,18 @@ function tagsFromSearchTerm(term) {
 
 function relationshipFallbackTerm(feed) {
   const relationship =
-    typeof feed?.relationship === "string" ? feed.relationship.trim().toLowerCase() : "";
+    typeof feed?.relationship === "string"
+      ? feed.relationship.trim().toLowerCase()
+      : "";
   if (!relationship) return null;
   const normalized = relationship.replace(/\s+/g, " ");
   return `gifts for ${normalized}`;
-}
-
-function pickRandom(values) {
-  if (!Array.isArray(values) || values.length === 0) return null;
-  const idx = Math.floor(Math.random() * values.length);
-  return values[idx] ?? null;
 }
 
 /**
  * Two-pass selection:
  * 1) Apply diversity cap first
  * 2) Backfill remaining slots from leftover ranked items
- * This keeps diversity as a preference while still filling the queue.
- * @param {Object[]} rankedItems - items sorted by score (best first), each with .tags (string[])
- * @param {{ targetSize: number, maxPerTag: number }} opts
- * @returns {Object[]} subset of rankedItems
  */
 function selectWithDiversityThenFill(rankedItems, { targetSize, maxPerTag }) {
   const selected = [];
@@ -175,9 +174,88 @@ function selectWithDiversityThenFill(rankedItems, { targetSize, maxPerTag }) {
 }
 
 /**
- * Refill the persisted queue for a feed: call API with search terms (interests or top tags),
- * filter already-seen and budget, upsert to catalog, rank, append up to REFILL_TARGET_SIZE.
- * Only calls API again in same refill if queue would still be below REFILL_THRESHOLD after adding.
+ * Fetch from API for a single search term, upsert ALL results into catalog,
+ * and return the IDs of newly-upserted items that are eligible for this feed.
+ */
+async function fetchAndUpsertTerm(term, feed, seenSet) {
+  const stats = {
+    fetched: 0,
+    skippedSeen: 0,
+    skippedBudget: 0,
+    fallbackTagsApplied: 0,
+    upserted: 0,
+  };
+
+  let products = [];
+  let source = "amazon";
+  try {
+    if (
+      process.env.REFILL_FAIL_TERM &&
+      term.toLowerCase() === process.env.REFILL_FAIL_TERM.toLowerCase()
+    ) {
+      throw new Error(`Simulated refill failure for term "${term}"`);
+    }
+    ({ products, source } = await fetchFromApi(term, feed));
+  } catch (err) {
+    await logRefill(`term="${term}" API failed`, {
+      message: err?.message || String(err),
+      amazonMessage: err?.amazonMessage,
+      canopyMessage: err?.canopyMessage,
+    });
+    return { ids: [], stats };
+  }
+
+  stats.fetched = products.length;
+  await logRefill(
+    `term="${term}" ${source} API: ${products.length} items`,
+    products.map((p) => ({
+      source_id: p.source_id,
+      title: (p.title || "").slice(0, 60),
+      price_cents: p.price_cents,
+    }))
+  );
+
+  // Upsert ALL products into catalog (the key change from v1).
+  const newIds = [];
+  for (const p of products) {
+    const key = `${p.source || "amazon"}:${p.source_id}`;
+
+    if (!Array.isArray(p.tags) || p.tags.length === 0) {
+      p.tags = tagsFromSearchTerm(term);
+      stats.fallbackTagsApplied++;
+    }
+
+    // Always upsert — even if seen, it refreshes catalog data (price, availability).
+    const id = await upsertProduct(p);
+
+    // Only add to candidate pool if unseen and in budget for this feed.
+    if (seenSet.has(key)) {
+      stats.skippedSeen++;
+      continue;
+    }
+    if (!inBudget(p, feed)) {
+      stats.skippedBudget++;
+      continue;
+    }
+    if (id) {
+      seenSet.add(key);
+      newIds.push(id);
+      stats.upserted++;
+    }
+  }
+
+  await logRefill(`term="${term}" upsert summary`, stats);
+  return { ids: newIds, stats };
+}
+
+/**
+ * Refill the persisted queue for a feed using two-tier sourcing:
+ *
+ * 1. Check catalog cache for unseen candidates matching feed tags + budget.
+ * 2. If cache satisfies the need (>= REFILL_TARGET_SIZE), skip API entirely.
+ * 3. Otherwise, call API for each search term, upsert ALL results, merge pools.
+ * 4. Rank combined candidates, apply diversity, append to queue.
+ *
  * @param {number} feedId
  * @returns {Promise<number>} count of items added to queue
  */
@@ -187,8 +265,10 @@ export async function refillQueue(feedId) {
 
   const queueSize = await getQueueSize(feedId);
   const isInitial = queueSize === 0;
+  const slotsNeeded = REFILL_TARGET_SIZE - queueSize;
+  if (slotsNeeded <= 0) return 0;
+
   const searchTerms = await getSearchTermsForRefill(feedId, isInitial);
-  if (!searchTerms.length) return 0;
   const terms = Array.from(
     new Set(
       searchTerms
@@ -198,137 +278,94 @@ export async function refillQueue(feedId) {
   );
   if (!terms.length) return 0;
 
-  const seenSet = await getSeenSourceIds(feedId);
-  const candidateIds = [];
-
   await logRefill(
-    `feedId=${feedId} isInitial=${isInitial} searchTerms=`,
-    searchTerms
+    `feedId=${feedId} isInitial=${isInitial} slotsNeeded=${slotsNeeded} searchTerms=`,
+    terms
   );
 
-  async function processTerm(term) {
-    let products = [];
-    let source = "amazon";
-    const stats = {
-      fetched: 0,
-      skippedSeen: 0,
-      skippedBudget: 0,
-      fallbackTagsApplied: 0,
-      upserted: 0,
-    };
-    try {
-      if (
-        process.env.REFILL_FAIL_TERM &&
-        term.toLowerCase() === process.env.REFILL_FAIL_TERM.toLowerCase()
-      ) {
-        throw new Error(`Simulated refill failure for term "${term}"`);
-      }
-      ({ products, source } = await fetchFromApi(term, feed));
-    } catch (err) {
-      await logRefill(`term="${term}" API failed`, {
-        message: err?.message || String(err),
-        amazonMessage: err?.amazonMessage,
-        canopyMessage: err?.canopyMessage,
-      });
-      return;
-    }
-    stats.fetched = products.length;
-    await logRefill(
-      `term="${term}" ${source} API: ${products.length} items`,
-      products.map((p) => ({
-        source_id: p.source_id,
-        title: (p.title || "").slice(0, 60),
-        price_cents: p.price_cents,
-      }))
-    );
-    const eligible = [];
-    for (const p of products) {
-      const key = `${p.source || "amazon"}:${p.source_id}`;
-      if (seenSet.has(key)) {
-        stats.skippedSeen++;
-        continue;
-      }
-      if (!inBudget(p, feed)) {
-        stats.skippedBudget++;
-        continue;
-      }
-      if (!Array.isArray(p.tags) || p.tags.length === 0) {
-        // Fallback when API metadata doesn't map: derive tags from the term that fetched this item.
-        p.tags = tagsFromSearchTerm(term);
-        stats.fallbackTagsApplied++;
-      }
-      eligible.push({ product: p, key });
-    }
+  const budget = budgetOpts(feed);
 
-    const picked = pickRandom(eligible);
-    if (picked) {
-      const id = await upsertProduct(picked.product);
-      if (id) {
-        seenSet.add(picked.key);
-        candidateIds.push(id);
-        stats.upserted++;
-        await logRefill(`term="${term}" picked random item`, {
-          source_id: picked.product.source_id,
-          title: (picked.product.title || "").slice(0, 60),
-          price_cents: picked.product.price_cents,
-        });
-      }
-    }
-    stats.eligibleAfterFilters = eligible.length;
-    await logRefill(`term="${term}" filter summary`, stats);
-  }
-
-  // Always sample from the top 3 highest-priority terms first.
-  const headTerms = terms.slice(0, 3);
-  const tailTerms = terms.slice(3);
-  for (const term of headTerms) {
-    await processTerm(term);
-  }
-
-  // After top-3 sampling, continue filling until target size.
-  if (candidateIds.length < REFILL_TARGET_SIZE) {
-    for (const term of tailTerms) {
-      await processTerm(term);
-      if (candidateIds.length >= REFILL_TARGET_SIZE) break;
-    }
-  }
-
-  // Fallback: if we still have little/no inventory, query a relationship-based gift phrase.
-  if (candidateIds.length < REFILL_TARGET_SIZE) {
-    const fallbackTerm = relationshipFallbackTerm(feed);
-    if (fallbackTerm) {
-      await logRefill(`fallback relationship term="${fallbackTerm}"`);
-      await processTerm(fallbackTerm);
-    }
-  }
-
-  if (candidateIds.length === 0) return 0;
-
-  const rows = await getProductsByIds(candidateIds);
-  const parsed = rows.map((p) => ({
-    ...p,
-    tags: parseTags(p.tags),
-  }));
-  const ranked = rankItems(parsed, feed);
-  const { selected, pass1Count, pass2Count } = selectWithDiversityThenFill(ranked, {
-    targetSize: REFILL_TARGET_SIZE,
-    maxPerTag: MAX_ITEMS_PER_TAG,
+  // ── Tier 1: Cache-first ──────────────────────────────────────────────
+  let cachedRows = await getUnseenCandidates(feedId, terms, {
+    ...budget,
+    limit: REFILL_TARGET_SIZE * 2, // fetch extra for ranking diversity
   });
-  const toAdd = selected.map((r) => r.id);
-  const addedRows = selected;
+  const cachedParsed = cachedRows.map((r) => ({ ...r, tags: parseTags(r.tags) }));
+
+  await logRefill(`cache hit: ${cachedParsed.length} unseen candidates`);
+
+  // ── Tier 2: API fetch (only when cache is thin) ──────────────────────
+  let apiIds = [];
+  if (cachedParsed.length < REFILL_TARGET_SIZE) {
+    const seenSet = await getSeenSourceIds(feedId);
+    // Also exclude items we already have from cache to avoid duplicates
+    const cachedIdSet = new Set(cachedParsed.map((r) => r.id));
+
+    const headTerms = terms.slice(0, 3);
+    const tailTerms = terms.slice(3);
+
+    for (const term of headTerms) {
+      const { ids } = await fetchAndUpsertTerm(term, feed, seenSet);
+      for (const id of ids) {
+        if (!cachedIdSet.has(id)) apiIds.push(id);
+      }
+    }
+
+    if (cachedParsed.length + apiIds.length < REFILL_TARGET_SIZE) {
+      for (const term of tailTerms) {
+        const { ids } = await fetchAndUpsertTerm(term, feed, seenSet);
+        for (const id of ids) {
+          if (!cachedIdSet.has(id)) apiIds.push(id);
+        }
+        if (cachedParsed.length + apiIds.length >= REFILL_TARGET_SIZE) break;
+      }
+    }
+
+    // Relationship fallback if still short
+    if (cachedParsed.length + apiIds.length < REFILL_TARGET_SIZE) {
+      const fallbackTerm = relationshipFallbackTerm(feed);
+      if (fallbackTerm) {
+        await logRefill(`fallback relationship term="${fallbackTerm}"`);
+        const { ids } = await fetchAndUpsertTerm(fallbackTerm, feed, seenSet);
+        for (const id of ids) {
+          if (!cachedIdSet.has(id)) apiIds.push(id);
+        }
+      }
+    }
+  }
+
+  // ── Combine, rank, select, enqueue ───────────────────────────────────
+  let apiParsed = [];
+  if (apiIds.length > 0) {
+    const apiRows = await getProductsByIds(apiIds);
+    apiParsed = apiRows.map((r) => ({ ...r, tags: parseTags(r.tags) }));
+    await logRefill(`API yielded ${apiParsed.length} new candidates`);
+  }
+
+  const allCandidates = [...cachedParsed, ...apiParsed];
+  if (allCandidates.length === 0) return 0;
+
+  const ranked = rankItems(allCandidates, feed);
+  const { selected, pass1Count, pass2Count } = selectWithDiversityThenFill(
+    ranked,
+    { targetSize: slotsNeeded, maxPerTag: MAX_ITEMS_PER_TAG }
+  );
 
   await logRefill("selection summary", {
-    candidateIds: candidateIds.length,
-    fetchedRows: rows.length,
+    cached: cachedParsed.length,
+    apiNew: apiParsed.length,
+    totalCandidates: allCandidates.length,
     ranked: ranked.length,
     selected: selected.length,
     diversityPassCount: pass1Count,
     backfillPassCount: pass2Count,
   });
 
+  const toAdd = selected.map((r) => r.id);
+
   await logRefill(
-    `adding to queue: ${addedRows.length} items`,
-    addedRows.map((r) => ({
+    `adding to queue: ${toAdd.length} items`,
+    selected.map((r) => ({
       id: r.id,
       source_id: r.source_id,
       title: (r.title || "").slice(0, 60),
