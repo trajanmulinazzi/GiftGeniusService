@@ -74,11 +74,30 @@ export async function dequeueBatch(feedId, count) {
 export async function appendToQueue(feedId, catalogItemIds) {
   if (!catalogItemIds?.length) return;
   const pool = await getDb();
+
+  // Get items already in queue to avoid duplicates
+  const existing = await pool.query(
+    "SELECT catalog_item_id FROM queue_items WHERE feed_id = $1",
+    [feedId]
+  );
+  const inQueue = new Set(existing.rows.map((r) => r.catalog_item_id));
+
+  // Also skip items the user has already interacted with or seen
+  const seen = await pool.query(
+    `SELECT catalog_item_id FROM interactions WHERE feed_id = $1
+     UNION
+     SELECT catalog_item_id FROM seen_items WHERE feed_id = $1`,
+    [feedId]
+  );
+  for (const row of seen.rows) inQueue.add(row.catalog_item_id);
+
   for (const catalogItemId of catalogItemIds) {
+    if (inQueue.has(catalogItemId)) continue;
     await pool.query(
       "INSERT INTO queue_items (feed_id, catalog_item_id) VALUES ($1, $2)",
       [feedId, catalogItemId]
     );
+    inQueue.add(catalogItemId); // prevent dupes within same batch
   }
   persistDb();
 }

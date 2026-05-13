@@ -138,3 +138,18 @@ END $$;
 -- GIN index on catalog tags (cast to jsonb) for cache-first candidate queries.
 -- Enables: WHERE tags::jsonb ?| ARRAY['outdoor','coffee']
 CREATE INDEX IF NOT EXISTS idx_catalog_tags_gin ON catalog USING gin ((tags::jsonb));
+
+-- LLM-expanded search terms per hobby/interest.
+-- When a user lists "coffee" as an interest, the engine expands it into
+-- diverse gift search queries ("espresso machine", "pour over kit", etc.)
+-- via an LLM and caches the results here for reuse across feeds.
+CREATE TABLE IF NOT EXISTS hobby_searches (
+  id SERIAL PRIMARY KEY,
+  hobby TEXT NOT NULL,
+  search_term TEXT NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(hobby, search_term)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hobby_searches_hobby ON hobby_searches(hobby);

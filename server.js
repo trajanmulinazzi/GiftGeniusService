@@ -3,6 +3,9 @@
  * First step: boot server + health endpoint.
  */
 
+import { readFile } from "fs/promises";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
@@ -11,6 +14,8 @@ import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { config } from "dotenv";
 import { z } from "zod";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 import { getDb } from "./db/index.js";
 import { createUser, getUser, getUserByEmail, listUsers } from "./models/user.js";
 import { createFeed, getFeed, getFeedsByUser, updateLastBatchAt } from "./models/feed.js";
@@ -41,6 +46,8 @@ const app = Fastify({
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
 const REFILL_THRESHOLD = 3;
+/** Track in-flight refills per feed to prevent races. */
+const refillInFlight = new Set();
 const jwtSecret = process.env.JWT_SECRET;
 if (!jwtSecret) {
   throw new Error("Missing JWT_SECRET. Set JWT_SECRET in environment.");
@@ -880,14 +887,20 @@ app.get(
     let items = await dequeueBatch(feedId, count);
 
     // If queue was empty, try a refill then dequeue again.
+    // Wait for any in-flight background refill first to avoid double-work.
     if (items.length === 0) {
-      try {
-        await refillQueue(feedId);
-      } catch (err) {
-        request.log.warn(
-          { feedId, message: err?.message || String(err) },
-          "initial refill failed"
-        );
+      if (!refillInFlight.has(feedId)) {
+        refillInFlight.add(feedId);
+        try {
+          await refillQueue(feedId);
+        } catch (err) {
+          request.log.warn(
+            { feedId, message: err?.message || String(err) },
+            "initial refill failed"
+          );
+        } finally {
+          refillInFlight.delete(feedId);
+        }
       }
       items = await dequeueBatch(feedId, count);
     }
@@ -911,11 +924,14 @@ app.get(
 
     const remaining = await getQueueSize(feedId);
 
-    // Trigger background refill if queue is running low.
-    if (remaining <= REFILL_THRESHOLD) {
-      refillQueue(feedId).catch((err) => {
-        request.log.warn({ msg: err?.message }, "background refill failed");
-      });
+    // Trigger background refill if queue is running low (skip if one is already running).
+    if (remaining <= REFILL_THRESHOLD && !refillInFlight.has(feedId)) {
+      refillInFlight.add(feedId);
+      refillQueue(feedId)
+        .catch((err) => {
+          request.log.warn({ msg: err?.message }, "background refill failed");
+        })
+        .finally(() => refillInFlight.delete(feedId));
     }
 
     function parseTags(tags) {
@@ -1111,6 +1127,12 @@ app.get(
     };
   }
 );
+
+// Serve dev UI
+app.get("/", async (request, reply) => {
+  const html = await readFile(join(__dirname, "public", "index.html"), "utf-8");
+  reply.type("text/html").send(html);
+});
 
 try {
   await app.listen({ port, host });

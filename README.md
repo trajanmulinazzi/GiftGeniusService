@@ -94,7 +94,7 @@ For a deep dive into how the engine works, see **[DEEP_DIVE.md](./DEEP_DIVE.md)*
 ### Prerequisites
 
 - **Node.js** 18+
-- **Docker** (for Postgres)
+- **Supabase** project (free tier works) — or Docker for local Postgres
 
 ### Install
 
@@ -104,14 +104,36 @@ cd giftgenius-engine
 npm install
 ```
 
-### Start Postgres
+### Set up Supabase
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. Go to **Settings → Database → Connection string** and copy the URI.
+3. Add it to `.env.local`:
+
+```
+DATABASE_URL=postgresql://postgres.[your-ref]:[your-password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+```
+
+4. Apply the schema:
 
 ```bash
-docker-compose up -d
 npm run db:migrate
 ```
 
-The schema includes `catalog`, `users`, `feeds`, `interactions`, `seen_items`, and `queue_items`. Run `db:migrate` after any schema change.
+This runs `psql` against your `DATABASE_URL`. Run it again after any schema change.
+
+<details>
+<summary>Alternative: local Docker Postgres</summary>
+
+```bash
+docker-compose up -d
+npm run db:migrate:docker
+```
+
+Set `DATABASE_URL=postgresql://giftgenius:giftgenius@localhost:5432/giftgenius` in `.env.local`.
+</details>
+
+The schema includes `catalog`, `users`, `feeds`, `interactions`, `seen_items`, and `queue_items`.
 
 ### Set up API keys (required for running the app)
 

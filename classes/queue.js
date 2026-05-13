@@ -104,7 +104,8 @@ export class Queue {
       options: [
         { value: "shop", label: "Shop", hint: "Open the product page" },
         { value: "save", label: "Save", hint: "Save for later" },
-        { value: "dislike", label: "Dislike", hint: "Not for me" },
+        { value: "scroll_past", label: "Skip", hint: "Not interested, show me the next one" },
+        { value: "dislike", label: "Dislike", hint: "Don't show me stuff like this" },
       ],
     });
 

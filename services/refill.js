@@ -1,15 +1,14 @@
 /**
- * Refill service — two-tier data sourcing:
+ * Refill service — round-robin sourcing across diverse search terms.
  *
- * Tier 1 (cache):  Query the catalog for unseen items matching the feed's top
- *                  tags + budget.  If enough candidates exist, skip the API entirely.
- *
- * Tier 2 (API):    When cache can't fill the queue, call Amazon Creator API
- *                  (fallback: Canopy).  ALL results are upserted into the catalog
- *                  so future refills for any feed can reuse them.
- *
- * After combining cached + freshly-fetched items, rank them with the feed's
- * tag weights, apply a diversity cap, and append to the persisted queue.
+ * Flow:
+ * 1. Get all expanded search terms for the feed's hobbies (from hobby_searches / LLM).
+ * 2. For each term, fetch from Amazon (fallback Canopy), cap to 2 eligible items per term.
+ * 3. Round-robin pick one item from each term bucket so consecutive queue items
+ *    always come from DIFFERENT search terms.
+ * 4. When all terms are exhausted, check recent sentiment:
+ *    - Negative (lots of skip/dislike) → generate brand new search terms via LLM
+ *    - Positive → re-query existing terms for 2 more items each
  */
 
 import { appendFile } from "fs/promises";
@@ -17,21 +16,18 @@ import { join } from "path";
 import * as amazonApi from "./amazon-api.js";
 import * as canopyApi from "./canopy-api.js";
 import { getFeed, getSearchTermsForRefill } from "../models/feed.js";
-import { getSeenSourceIds } from "../models/interaction.js";
+import { getSeenSourceIds, getRecentSentiment } from "../models/interaction.js";
 import {
   upsertProduct,
   getProductsByIds,
-  getUnseenCandidates,
 } from "../models/catalog.js";
 import { appendToQueue, getQueueSize } from "../models/queue.js";
-import { rankItems } from "./ranking.js";
 import { normalizeTags } from "../data/tag-canonical.js";
+import { getExpandedSearchTerms } from "./search-term-expander.js";
 
 const REFILL_TARGET_SIZE = 6;
-const REFILL_THRESHOLD = 3;
-const API_ITEM_COUNT = 10;
-/** Max items with the same tag in one refill batch (diversity cap). */
-const MAX_ITEMS_PER_TAG = 2;
+/** Max eligible items to keep per search term. */
+const ITEMS_PER_TERM = 2;
 
 const QUEUE_LOG = join(process.cwd(), "queue.log");
 const LOG_TO_CONSOLE =
@@ -50,9 +46,6 @@ async function logRefill(message, detail = null) {
   }
 }
 
-/**
- * Build budget options (cents) from feed (dollars).
- */
 function budgetOpts(feed) {
   const opts = {};
   if (feed.budget_min != null)
@@ -62,19 +55,16 @@ function budgetOpts(feed) {
   return opts;
 }
 
-/**
- * Fetch products from API: try Amazon first, fallback to Canopy.
- */
 async function fetchFromApi(searchTerm, feed) {
   const budget = budgetOpts(feed || {});
-  const apiOpts = { itemCount: API_ITEM_COUNT, ...budget };
+  const apiOpts = { itemCount: 10, ...budget };
   try {
     const products = await amazonApi.searchProducts(searchTerm, apiOpts);
     return { products, source: "amazon" };
   } catch (amazonErr) {
     try {
       const products = await canopyApi.searchProducts(searchTerm, {
-        limit: 20,
+        limit: 10,
         ...budget,
       });
       return { products, source: "canopy" };
@@ -87,9 +77,6 @@ async function fetchFromApi(searchTerm, feed) {
   }
 }
 
-/**
- * Filter by budget (feed budget_min/budget_max in dollars; product price_cents).
- */
 function inBudget(product, feed) {
   const cents = product.price_cents;
   if (feed.budget_min != null) {
@@ -122,70 +109,11 @@ function tagsFromSearchTerm(term) {
   return normalizeTags(raw);
 }
 
-function relationshipFallbackTerm(feed) {
-  const relationship =
-    typeof feed?.relationship === "string"
-      ? feed.relationship.trim().toLowerCase()
-      : "";
-  if (!relationship) return null;
-  const normalized = relationship.replace(/\s+/g, " ");
-  return `gifts for ${normalized}`;
-}
-
-/**
- * Two-pass selection:
- * 1) Apply diversity cap first
- * 2) Backfill remaining slots from leftover ranked items
- */
-function selectWithDiversityThenFill(rankedItems, { targetSize, maxPerTag }) {
-  const selected = [];
-  const tagCount = {};
-  const selectedIds = new Set();
-  let pass1Count = 0;
-  let pass2Count = 0;
-
-  // Pass 1: diversity-constrained picks.
-  for (const item of rankedItems) {
-    if (selected.length >= targetSize) break;
-    const tags = (item.tags && Array.isArray(item.tags) ? item.tags : []).map(
-      (t) => String(t).toLowerCase()
-    );
-    const wouldExceed =
-      tags.length > 0 && tags.some((tag) => (tagCount[tag] || 0) >= maxPerTag);
-    if (wouldExceed) continue;
-    selected.push(item);
-    selectedIds.add(item.id);
-    pass1Count++;
-    for (const tag of tags) tagCount[tag] = (tagCount[tag] || 0) + 1;
-  }
-
-  // Pass 2: fill remaining queue slots from highest-ranked leftovers.
-  if (selected.length < targetSize) {
-    for (const item of rankedItems) {
-      if (selected.length >= targetSize) break;
-      if (selectedIds.has(item.id)) continue;
-      selected.push(item);
-      selectedIds.add(item.id);
-      pass2Count++;
-    }
-  }
-
-  return { selected, pass1Count, pass2Count };
-}
-
 /**
  * Fetch from API for a single search term, upsert ALL results into catalog,
- * and return the IDs of newly-upserted items that are eligible for this feed.
+ * and return up to `maxEligible` IDs of items eligible for this feed.
  */
-async function fetchAndUpsertTerm(term, feed, seenSet) {
-  const stats = {
-    fetched: 0,
-    skippedSeen: 0,
-    skippedBudget: 0,
-    fallbackTagsApplied: 0,
-    upserted: 0,
-  };
-
+async function fetchAndUpsertTerm(term, feed, seenSet, maxEligible = ITEMS_PER_TERM) {
   let products = [];
   let source = "amazon";
   try {
@@ -199,62 +127,62 @@ async function fetchAndUpsertTerm(term, feed, seenSet) {
   } catch (err) {
     await logRefill(`term="${term}" API failed`, {
       message: err?.message || String(err),
-      amazonMessage: err?.amazonMessage,
-      canopyMessage: err?.canopyMessage,
     });
-    return { ids: [], stats };
+    return [];
   }
 
-  stats.fetched = products.length;
-  await logRefill(
-    `term="${term}" ${source} API: ${products.length} items`,
-    products.map((p) => ({
-      source_id: p.source_id,
-      title: (p.title || "").slice(0, 60),
-      price_cents: p.price_cents,
-    }))
-  );
+  await logRefill(`term="${term}" ${source} API: ${products.length} items`);
 
-  // Upsert ALL products into catalog (the key change from v1).
-  const newIds = [];
+  const eligibleIds = [];
   for (const p of products) {
     const key = `${p.source || "amazon"}:${p.source_id}`;
 
     if (!Array.isArray(p.tags) || p.tags.length === 0) {
       p.tags = tagsFromSearchTerm(term);
-      stats.fallbackTagsApplied++;
     }
 
-    // Always upsert — even if seen, it refreshes catalog data (price, availability).
     const id = await upsertProduct(p);
 
-    // Only add to candidate pool if unseen and in budget for this feed.
-    if (seenSet.has(key)) {
-      stats.skippedSeen++;
-      continue;
-    }
-    if (!inBudget(p, feed)) {
-      stats.skippedBudget++;
-      continue;
-    }
+    if (eligibleIds.length >= maxEligible) continue;
+    if (seenSet.has(key)) continue;
+    if (!inBudget(p, feed)) continue;
     if (id) {
       seenSet.add(key);
-      newIds.push(id);
-      stats.upserted++;
+      eligibleIds.push(id);
     }
   }
 
-  await logRefill(`term="${term}" upsert summary`, stats);
-  return { ids: newIds, stats };
+  await logRefill(`term="${term}" eligible: ${eligibleIds.length}/${products.length}`);
+  return eligibleIds;
 }
 
 /**
- * Refill the persisted queue for a feed using two-tier sourcing:
- *
- * 1. Check catalog cache for unseen candidates matching feed tags + budget.
- * 2. If cache satisfies the need (>= REFILL_TARGET_SIZE), skip API entirely.
- * 3. Otherwise, call API for each search term, upsert ALL results, merge pools.
- * 4. Rank combined candidates, apply diversity, append to queue.
+ * Round-robin pick from term buckets: take 1 from each bucket in turn.
+ * This guarantees consecutive items come from DIFFERENT search terms.
+ * @param {number[][]} buckets - each bucket is IDs from one search term
+ * @param {number} limit - max items to return
+ * @returns {number[]} interleaved IDs
+ */
+function roundRobinPick(buckets, limit) {
+  const result = [];
+  let idx = 0;
+  while (result.length < limit) {
+    let added = false;
+    for (const bucket of buckets) {
+      if (result.length >= limit) break;
+      if (idx < bucket.length) {
+        result.push(bucket[idx]);
+        added = true;
+      }
+    }
+    if (!added) break;
+    idx++;
+  }
+  return result;
+}
+
+/**
+ * Refill the persisted queue for a feed.
  *
  * @param {number} feedId
  * @returns {Promise<number>} count of items added to queue
@@ -264,9 +192,11 @@ export async function refillQueue(feedId) {
   if (!feed) return 0;
 
   const queueSize = await getQueueSize(feedId);
-  const isInitial = queueSize === 0;
   const slotsNeeded = REFILL_TARGET_SIZE - queueSize;
   if (slotsNeeded <= 0) return 0;
+
+  const isInitial = queueSize === 0;
+  const seenSet = await getSeenSourceIds(feedId);
 
   const searchTerms = await getSearchTermsForRefill(feedId, isInitial);
   const terms = Array.from(
@@ -276,101 +206,81 @@ export async function refillQueue(feedId) {
         .filter(Boolean)
     )
   );
-  if (!terms.length) return 0;
 
   await logRefill(
-    `feedId=${feedId} isInitial=${isInitial} slotsNeeded=${slotsNeeded} searchTerms=`,
+    `feedId=${feedId} isInitial=${isInitial} slotsNeeded=${slotsNeeded} terms=`,
     terms
   );
 
-  const budget = budgetOpts(feed);
+  if (!terms.length) return 0;
 
-  // ── Tier 1: Cache-first ──────────────────────────────────────────────
-  let cachedRows = await getUnseenCandidates(feedId, terms, {
-    ...budget,
-    limit: REFILL_TARGET_SIZE * 2, // fetch extra for ranking diversity
-  });
-  const cachedParsed = cachedRows.map((r) => ({ ...r, tags: parseTags(r.tags) }));
+  // ── Fetch 2 items per term ──────────────────────────────────────────
+  // Each bucket = IDs from one search term. We track them separately
+  // so we can round-robin across terms for the final queue order.
+  const buckets = [];
+  let totalCollected = 0;
 
-  await logRefill(`cache hit: ${cachedParsed.length} unseen candidates`);
-
-  // ── Tier 2: API fetch (only when cache is thin) ──────────────────────
-  let apiIds = [];
-  if (cachedParsed.length < REFILL_TARGET_SIZE) {
-    const seenSet = await getSeenSourceIds(feedId);
-    // Also exclude items we already have from cache to avoid duplicates
-    const cachedIdSet = new Set(cachedParsed.map((r) => r.id));
-
-    const headTerms = terms.slice(0, 3);
-    const tailTerms = terms.slice(3);
-
-    for (const term of headTerms) {
-      const { ids } = await fetchAndUpsertTerm(term, feed, seenSet);
-      for (const id of ids) {
-        if (!cachedIdSet.has(id)) apiIds.push(id);
-      }
+  for (const term of terms) {
+    const ids = await fetchAndUpsertTerm(term, feed, seenSet, ITEMS_PER_TERM);
+    if (ids.length > 0) {
+      buckets.push(ids);
+      totalCollected += ids.length;
     }
+  }
 
-    if (cachedParsed.length + apiIds.length < REFILL_TARGET_SIZE) {
-      for (const term of tailTerms) {
-        const { ids } = await fetchAndUpsertTerm(term, feed, seenSet);
-        for (const id of ids) {
-          if (!cachedIdSet.has(id)) apiIds.push(id);
+  // ── If not enough, check sentiment and decide strategy ──────────────
+  if (totalCollected < slotsNeeded) {
+    const sentiment = await getRecentSentiment(feedId);
+    await logRefill("sentiment check", sentiment);
+
+    if (sentiment.total === 0 || sentiment.negative > sentiment.positive) {
+      await logRefill("negative sentiment → generating new search terms");
+      const interests = Array.isArray(feed.interests) ? feed.interests : [];
+      for (const hobby of interests) {
+        const freshTerms = await getExpandedSearchTerms(hobby, 5);
+        for (const term of freshTerms) {
+          if (totalCollected >= slotsNeeded) break;
+          const ids = await fetchAndUpsertTerm(term, feed, seenSet, ITEMS_PER_TERM);
+          if (ids.length > 0) {
+            buckets.push(ids);
+            totalCollected += ids.length;
+          }
         }
-        if (cachedParsed.length + apiIds.length >= REFILL_TARGET_SIZE) break;
+        if (totalCollected >= slotsNeeded) break;
       }
-    }
-
-    // Relationship fallback if still short
-    if (cachedParsed.length + apiIds.length < REFILL_TARGET_SIZE) {
-      const fallbackTerm = relationshipFallbackTerm(feed);
-      if (fallbackTerm) {
-        await logRefill(`fallback relationship term="${fallbackTerm}"`);
-        const { ids } = await fetchAndUpsertTerm(fallbackTerm, feed, seenSet);
-        for (const id of ids) {
-          if (!cachedIdSet.has(id)) apiIds.push(id);
+    } else {
+      await logRefill("positive sentiment → fetching more from existing terms");
+      for (const term of terms) {
+        if (totalCollected >= slotsNeeded) break;
+        const ids = await fetchAndUpsertTerm(term, feed, seenSet, ITEMS_PER_TERM);
+        if (ids.length > 0) {
+          buckets.push(ids);
+          totalCollected += ids.length;
         }
       }
     }
   }
 
-  // ── Combine, rank, select, enqueue ───────────────────────────────────
-  let apiParsed = [];
-  if (apiIds.length > 0) {
-    const apiRows = await getProductsByIds(apiIds);
-    apiParsed = apiRows.map((r) => ({ ...r, tags: parseTags(r.tags) }));
-    await logRefill(`API yielded ${apiParsed.length} new candidates`);
-  }
+  if (totalCollected === 0) return 0;
 
-  const allCandidates = [...cachedParsed, ...apiParsed];
-  if (allCandidates.length === 0) return 0;
+  // ── Round-robin across term buckets → final queue order ─────────────
+  // This is the KEY step: we pick 1 item from term A, 1 from term B,
+  // 1 from term C, then back to term A, etc. No ranking step that would
+  // re-group similar items together.
+  const toAdd = roundRobinPick(buckets, slotsNeeded);
 
-  const ranked = rankItems(allCandidates, feed);
-  const { selected, pass1Count, pass2Count } = selectWithDiversityThenFill(
-    ranked,
-    { targetSize: slotsNeeded, maxPerTag: MAX_ITEMS_PER_TAG }
-  );
-
-  await logRefill("selection summary", {
-    cached: cachedParsed.length,
-    apiNew: apiParsed.length,
-    totalCandidates: allCandidates.length,
-    ranked: ranked.length,
-    selected: selected.length,
-    diversityPassCount: pass1Count,
-    backfillPassCount: pass2Count,
-  });
-
-  const toAdd = selected.map((r) => r.id);
+  // Fetch full rows just for logging
+  const rows = await getProductsByIds(toAdd);
+  const rowMap = new Map(rows.map((r) => [r.id, r]));
 
   await logRefill(
     `adding to queue: ${toAdd.length} items`,
-    selected.map((r) => ({
-      id: r.id,
-      source_id: r.source_id,
-      title: (r.title || "").slice(0, 60),
-      price_cents: r.price_cents,
-    }))
+    toAdd.map((id) => {
+      const r = rowMap.get(id);
+      return r
+        ? { id: r.id, source_id: r.source_id, title: (r.title || "").slice(0, 60), price_cents: r.price_cents }
+        : { id };
+    })
   );
 
   await appendToQueue(feedId, toAdd);

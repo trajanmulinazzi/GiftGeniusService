@@ -22,10 +22,13 @@
     "canopy:response": "node scripts/canopy-api-response.js",
     "canopy:search-to-catalog": "node scripts/canopy-search-to-catalog.js",
     "verify:refill": "node scripts/verify-refill-behavior.js",
-    "db:migrate": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
+    "db:clear": "node scripts/clear-data.js",
+    "db:migrate": "psql \"$DATABASE_URL\" < db/schema.pg.sql",
+    "db:migrate:docker": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {
     "@amzn/creatorsapi-nodejs-sdk": "file:../creatorsapi-nodejs-sdk",
+    "@anthropic-ai/sdk": "^0.95.0",
     "@clack/prompts": "^1.0.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.0.0",

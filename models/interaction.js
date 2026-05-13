@@ -57,6 +57,8 @@ export async function getSeenSourceIds(feedId) {
        SELECT catalog_item_id FROM interactions WHERE feed_id = $1
        UNION
        SELECT catalog_item_id FROM seen_items WHERE feed_id = $1
+       UNION
+       SELECT catalog_item_id FROM queue_items WHERE feed_id = $1
      ) s ON s.catalog_item_id = c.id`,
     [feedId]
   );
@@ -137,6 +139,35 @@ export async function getInteractionsForFeed(feedId) {
     [feedId]
   );
   return result.rows;
+}
+
+/**
+ * Get sentiment summary for the most recent N interactions on a feed.
+ * Returns { positive, negative, total } where positive = shop+save+like,
+ * negative = dislike+scroll_past+pass.
+ * @param {number} feedId
+ * @param {number} [limit=20] - how many recent interactions to analyze
+ */
+export async function getRecentSentiment(feedId, limit = 20) {
+  const pool = await getDb();
+  const result = await pool.query(
+    `SELECT type, COUNT(*)::int AS cnt
+     FROM (
+       SELECT type FROM interactions
+       WHERE feed_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2
+     ) recent
+     GROUP BY type`,
+    [feedId, limit]
+  );
+  let positive = 0;
+  let negative = 0;
+  for (const row of result.rows) {
+    if (["shop", "save", "like"].includes(row.type)) positive += row.cnt;
+    else negative += row.cnt;
+  }
+  return { positive, negative, total: positive + negative };
 }
 
 /**

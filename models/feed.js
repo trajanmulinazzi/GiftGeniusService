@@ -1,4 +1,5 @@
 import { getDb, persistDb } from "../db/index.js";
+import { getExpandedSearchTerms } from "../services/search-term-expander.js";
 
 /**
  * Feed model - personalized recommendation context (one per recipient/gift list)
@@ -140,28 +141,51 @@ export async function getTagWeights(feedId) {
 const TOP_TAGS_LIMIT = 5;
 
 /**
- * Search terms for refill: initial load uses explicit interests; subsequent uses top tag weights.
+ * Search terms for refill: expands each hobby/interest into diverse gift
+ * search queries via LLM (cached in hobby_searches table).
+ *
+ * Initial load uses explicit interests; subsequent refills use top tag weights.
+ * Each hobby is expanded into ~5 specific search terms (e.g. "coffee" →
+ * "espresso machine", "pour over kit", "coffee grinder", etc.)
+ *
  * @param {number} feedId
  * @param {boolean} isInitial - true when queue was empty (first refill for this feed session)
- * @returns {Promise<string[]>} search terms for API (e.g. ["coffee", "hiking"])
+ * @returns {Promise<string[]>} expanded search terms for API
  */
 export async function getSearchTermsForRefill(feedId, isInitial) {
   const feed = await getFeed(feedId);
   if (!feed) return [];
 
+  // Determine which hobbies/interests to expand
+  let hobbies;
   if (isInitial) {
     const interests = feed.interests || [];
-    return Array.isArray(interests) ? interests : [];
+    hobbies = Array.isArray(interests) ? interests : [];
+  } else {
+    const weights = feed.tag_weights || {};
+    const entries = Object.entries(weights)
+      .filter(([, w]) => typeof w === "number" && w > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, TOP_TAGS_LIMIT);
+    hobbies =
+      entries.length > 0
+        ? entries.map(([tag]) => tag)
+        : Array.isArray(feed.interests)
+          ? feed.interests
+          : [];
   }
 
-  const weights = feed.tag_weights || {};
-  const entries = Object.entries(weights)
-    .filter(([, w]) => typeof w === "number" && w > 0)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, TOP_TAGS_LIMIT);
-  if (entries.length > 0) return entries.map(([tag]) => tag);
-  const interests = feed.interests || [];
-  return Array.isArray(interests) ? interests : [];
+  if (!hobbies.length) return [];
+
+  // Expand each hobby into diverse search terms via LLM (cached)
+  const termsPerHobby = Math.max(2, Math.floor(10 / hobbies.length));
+  const allTerms = [];
+  for (const hobby of hobbies) {
+    const expanded = await getExpandedSearchTerms(hobby, termsPerHobby);
+    allTerms.push(...expanded);
+  }
+
+  return allTerms;
 }
 
 /**

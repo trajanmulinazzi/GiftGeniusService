@@ -14,8 +14,19 @@ const { Pool } = pg;
 let _pool = null;
 
 function getConnectionConfig() {
-  if (process.env.DATABASE_URL) {
-    return { connectionString: process.env.DATABASE_URL };
+  const connStr = process.env.DATABASE_URL;
+  if (connStr) {
+    const config = { connectionString: connStr };
+    // Supabase (and most hosted Postgres) requires SSL.
+    // Detect by hostname or explicit flag.
+    const needsSsl =
+      process.env.PGSSLMODE === "require" ||
+      connStr.includes("supabase.com") ||
+      connStr.includes("neon.tech");
+    if (needsSsl) {
+      config.ssl = { rejectUnauthorized: false };
+    }
+    return config;
   }
   return {
     host: process.env.PGHOST ?? "localhost",
