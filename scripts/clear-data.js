@@ -1,5 +1,5 @@
 /**
- * Truncate all data tables except users and feeds.
+ * Truncate all data tables.
  * Usage: node scripts/clear-data.js
  */
 import { config } from "dotenv";
@@ -8,18 +8,12 @@ config();
 
 import { getDb } from "../db/index.js";
 
-const TABLES = [
-  "queue_items",
-  "seen_items",
-  "interactions",
-  "hobby_searches",
-  "catalog",
-];
+const TABLES = ["users"];
 
 const pool = await getDb();
 for (const table of TABLES) {
   await pool.query(`DELETE FROM ${table}`);
   console.log(`Cleared ${table}`);
 }
-console.log("Done. Users and feeds untouched.");
+console.log("Done.");
 process.exit(0);
