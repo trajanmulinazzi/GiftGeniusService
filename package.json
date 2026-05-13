@@ -11,7 +11,7 @@
     "start": "node index.js",
     "start:api": "node server.js",
     "db:clear": "node scripts/clear-data.js",
-    "db:migrate": "psql \"$DATABASE_URL\" < db/schema.pg.sql",
+    "db:migrate": "node scripts/migrate.js",
     "db:migrate:docker": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {
@@ -23,6 +23,7 @@
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.6",
+    "@supabase/supabase-js": "^2.105.4",
     "dotenv": "^17.2.4",
     "fastify": "^5.8.5",
     "pg": "^8.18.0",

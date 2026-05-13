@@ -1,336 +1,484 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GiftGenius</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #222; display: flex; justify-content: center; min-height: 100vh; padding: 20px; }
-  .app { max-width: 420px; width: 100%; }
-  h1 { text-align: center; margin-bottom: 20px; font-size: 24px; }
-  .panel { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
-  .panel h2 { font-size: 16px; margin-bottom: 12px; color: #555; }
-  label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
-  select, input { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; margin-bottom: 10px; }
-  button { padding: 10px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  .btn-primary { background: #4f46e5; color: #fff; width: 100%; }
-  .btn-primary:hover:not(:disabled) { background: #4338ca; }
-  .hidden { display: none !important; }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GiftGenius Engine — Test Console</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; }
 
-  /* Card */
-  .card { background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.1); margin-bottom: 16px; }
-  .card img { width: 100%; height: 300px; object-fit: contain; background: #fafafa; }
-  .card-body { padding: 16px; }
-  .card-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; line-height: 1.3; }
-  .card-price { font-size: 18px; font-weight: 700; color: #16a34a; margin-bottom: 4px; }
-  .card-tags { font-size: 12px; color: #999; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 1.6rem; margin-bottom: 6px; color: #fff; }
+    h2 { font-size: 1.1rem; margin-bottom: 10px; color: #a78bfa; border-bottom: 1px solid #333; padding-bottom: 6px; }
+    h3 { font-size: 0.95rem; color: #8b8b8b; margin-bottom: 12px; }
 
-  /* Action buttons */
-  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
-  .actions button { padding: 14px; font-size: 15px; border-radius: 12px; }
-  .btn-shop { background: #16a34a; color: #fff; }
-  .btn-save { background: #2563eb; color: #fff; }
-  .btn-skip { background: #e5e7eb; color: #555; }
-  .btn-dislike { background: #fecaca; color: #b91c1c; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
 
-  .status { text-align: center; color: #888; font-size: 13px; padding: 20px 0; }
-  .loading { text-align: center; padding: 40px 0; color: #888; }
+    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 16px; }
+    .card.full { grid-column: 1 / -1; }
 
-  /* Create form rows */
-  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .form-row.full { grid-template-columns: 1fr; }
+    label { display: block; font-size: 0.8rem; color: #888; margin-bottom: 4px; margin-top: 10px; }
+    label:first-child { margin-top: 0; }
+    input, select, textarea { width: 100%; padding: 8px 10px; background: #111; border: 1px solid #333; border-radius: 6px; color: #e0e0e0; font-size: 0.85rem; }
+    input:focus, select:focus { outline: none; border-color: #a78bfa; }
+    textarea { resize: vertical; min-height: 60px; font-family: monospace; font-size: 0.8rem; }
 
-  /* Saved items */
-  .saved-item { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eee; }
-  .saved-item img { width: 60px; height: 60px; object-fit: contain; border-radius: 6px; background: #fafafa; }
-  .saved-item-info { flex: 1; min-width: 0; }
-  .saved-item-title { font-size: 13px; line-height: 1.3; }
-  .saved-item-price { font-size: 13px; font-weight: 600; color: #16a34a; }
+    .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 6px; font-size: 0.85rem; cursor: pointer; font-weight: 500; margin-top: 10px; margin-right: 6px; transition: opacity 0.15s; }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #7c3aed; color: white; }
+    .btn-success { background: #059669; color: white; }
+    .btn-warning { background: #d97706; color: white; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-secondary { background: #333; color: #ccc; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-radius: 10px; overflow: hidden; border: 1px solid #ddd; }
-  .tab-bar button { flex: 1; padding: 10px; background: #fff; border: none; font-size: 14px; font-weight: 500; color: #888; cursor: pointer; }
-  .tab-bar button.active { background: #4f46e5; color: #fff; }
-</style>
+    .row { display: flex; gap: 10px; align-items: flex-end; }
+    .row > * { flex: 1; }
+
+    .log { background: #0a0a0a; border: 1px solid #222; border-radius: 6px; padding: 10px; margin-top: 10px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.75rem; white-space: pre-wrap; color: #6ee7b7; }
+    .log.error { color: #fca5a5; }
+
+    .stats { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+    .stat { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 14px; text-align: center; min-width: 100px; }
+    .stat .val { font-size: 1.4rem; font-weight: 700; color: #a78bfa; }
+    .stat .lbl { font-size: 0.7rem; color: #666; margin-top: 2px; }
+
+    .feed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+    .feed-item { background: #111; border: 1px solid #2a2a2a; border-radius: 10px; overflow: hidden; transition: border-color 0.2s; }
+    .feed-item:hover { border-color: #555; }
+    .feed-item img { width: 100%; height: 160px; object-fit: contain; background: #fff; }
+    .feed-item .info { padding: 10px; }
+    .feed-item .title { font-size: 0.8rem; line-height: 1.3; max-height: 3.2em; overflow: hidden; color: #ccc; }
+    .feed-item .meta { font-size: 0.7rem; color: #666; margin-top: 4px; }
+    .feed-item .price { font-size: 1rem; font-weight: 700; color: #6ee7b7; margin-top: 4px; }
+    .feed-item .slot-badge { display: inline-block; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; margin-top: 4px; }
+    .slot-interest { background: #7c3aed33; color: #a78bfa; }
+    .slot-adjacent { background: #05966933; color: #6ee7b7; }
+    .slot-wildcard { background: #d9770633; color: #fbbf24; }
+    .slot-occasion { background: #dc262633; color: #fca5a5; }
+
+    .signal-btns { display: flex; gap: 4px; padding: 8px 10px; border-top: 1px solid #222; }
+    .signal-btns .btn { flex: 1; margin: 0; padding: 5px; font-size: 0.7rem; text-align: center; }
+
+    .tag { display: inline-block; font-size: 0.7rem; padding: 2px 8px; background: #7c3aed22; color: #a78bfa; border-radius: 4px; margin: 2px; }
+
+    #status { position: fixed; bottom: 16px; right: 16px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 8px 14px; font-size: 0.75rem; color: #6ee7b7; display: none; z-index: 100; }
+    #status.error { color: #fca5a5; border-color: #dc2626; }
+  </style>
 </head>
 <body>
-<div class="app">
-  <h1>GiftGenius</h1>
+  <div class="container">
+    <h1>GiftGenius Engine</h1>
+    <h3>Test Console — Backend Engine HLA</h3>
 
-  <!-- Setup Panel -->
-  <div id="setup">
-    <div class="panel">
-      <h2>Select User</h2>
-      <select id="userSelect"><option value="">Loading...</option></select>
-      <div id="newUserForm" class="hidden">
-        <input id="newUserName" placeholder="Name">
-        <input id="newUserEmail" placeholder="Email">
-        <button class="btn-primary" onclick="createNewUser()">Create User</button>
-      </div>
-    </div>
-    <div id="feedPanel" class="panel hidden">
-      <h2>Select Feed</h2>
-      <select id="feedSelect"><option value="">Pick a feed...</option></select>
-      <div id="newFeedForm" class="hidden">
-        <input id="feedName" placeholder="Name (e.g. Mom)">
-        <input id="feedRelationship" placeholder="Relationship (e.g. mom, friend)">
-        <input id="feedInterests" placeholder="Interests (comma separated)">
-        <div class="form-row">
-          <input id="feedBudgetMin" type="number" placeholder="Budget min ($)">
-          <input id="feedBudgetMax" type="number" placeholder="Budget max ($)">
+    <div class="grid">
+      <!-- ─── Setup Panel ─── -->
+      <div class="card">
+        <h2>1. Setup</h2>
+
+        <p style="font-size:0.8rem;color:#888;margin-bottom:10px">
+          Sync hobbies, angles, and occasions from <code>taxonomy/*.txt</code> files into Supabase.
+        </p>
+        <button class="btn btn-primary" onclick="syncTaxonomy()">Sync Taxonomy</button>
+        <button class="btn btn-secondary" onclick="loadHobbies()">Refresh List</button>
+        <button class="btn btn-secondary" onclick="viewTaxonomy()">View Config</button>
+
+        <div id="hobby-list" style="margin-top:10px"></div>
+        <div class="log" id="taxonomy-log" style="display:none"></div>
+
+        <label>Create Test User</label>
+        <div class="row">
+          <div><input id="user-name" placeholder="Name" value="Test User"></div>
+          <div><input id="user-email" placeholder="Email" value="test@example.com"></div>
         </div>
-        <button class="btn-primary" onclick="createNewFeed()">Create Feed</button>
+        <button class="btn btn-primary" onclick="createUser()">Create User</button>
+
+        <div id="user-list" style="margin-top:10px"></div>
       </div>
-      <button id="startBtn" class="btn-primary hidden" style="margin-top:8px" onclick="startFeed()">Start Swiping</button>
+
+      <!-- ─── Precompute Panel ─── -->
+      <div class="card">
+        <h2>2. Pre-Compute</h2>
+        <p style="font-size:0.8rem;color:#888;margin-bottom:10px">
+          Runs Claude to generate search terms for all hobby×angle and occasion×budget pairs.
+          This is required before feeds will work.
+        </p>
+        <button class="btn btn-warning" onclick="runPrecompute()">Run Full Pipeline</button>
+        <button class="btn btn-secondary" onclick="loadStats()">Refresh Stats</button>
+
+        <div class="stats" id="stats"></div>
+        <div class="log" id="precompute-log"></div>
+      </div>
+
+      <!-- ─── Profile Panel ─── -->
+      <div class="card">
+        <h2>3. Create Profile</h2>
+
+        <label>User</label>
+        <select id="profile-user"></select>
+
+        <label>Label (recipient name)</label>
+        <input id="profile-label" placeholder="Mom" value="Mom">
+
+        <label>Hobbies (select multiple)</label>
+        <select id="profile-hobbies" multiple size="4"></select>
+
+        <div class="row">
+          <div>
+            <label>Budget Min ($)</label>
+            <input id="profile-budget-min" type="number" value="25">
+          </div>
+          <div>
+            <label>Budget Max ($)</label>
+            <input id="profile-budget-max" type="number" value="100">
+          </div>
+        </div>
+
+        <button class="btn btn-success" onclick="createProfile()">Create Profile</button>
+
+        <div id="profile-list" style="margin-top:10px"></div>
+      </div>
+
+      <!-- ─── Session Panel ─── -->
+      <div class="card">
+        <h2>4. Start Session</h2>
+
+        <label>Profile</label>
+        <select id="session-profile"></select>
+
+        <label>Occasion</label>
+        <select id="session-occasion">
+          <option value="birthday">Birthday</option>
+          <option value="christmas">Christmas</option>
+          <option value="mothers_day">Mother's Day</option>
+          <option value="fathers_day">Father's Day</option>
+          <option value="anniversary">Anniversary</option>
+          <option value="graduation">Graduation</option>
+          <option value="housewarming">Housewarming</option>
+          <option value="just_because">Just Because</option>
+        </select>
+
+        <button class="btn btn-success" onclick="startSession()">Start Session</button>
+
+        <div id="session-info" style="margin-top:10px"></div>
+      </div>
+
+      <!-- ─── Feed Panel ─── -->
+      <div class="card full">
+        <h2>5. Feed</h2>
+        <div class="row" style="align-items:center">
+          <div>
+            <label>Active Session</label>
+            <select id="feed-session"></select>
+          </div>
+          <div>
+            <label>Batch Size</label>
+            <input id="feed-batch" type="number" value="10" style="width:80px">
+          </div>
+          <div style="flex:0">
+            <button class="btn btn-primary" onclick="loadFeed()" style="margin-top:22px;white-space:nowrap">Load Feed</button>
+          </div>
+        </div>
+
+        <div class="feed-grid" id="feed-grid"></div>
+        <div class="log" id="feed-log" style="display:none"></div>
+      </div>
+
+      <!-- ─── API Usage ─── -->
+      <div class="card">
+        <h2>API Usage</h2>
+        <button class="btn btn-secondary" onclick="loadApiUsage()">Check Usage</button>
+        <div id="api-usage" style="margin-top:10px"></div>
+      </div>
+
+      <!-- ─── Raw API ─── -->
+      <div class="card">
+        <h2>Raw API Call</h2>
+        <label>Method</label>
+        <select id="raw-method">
+          <option>GET</option>
+          <option>POST</option>
+          <option>PATCH</option>
+        </select>
+        <label>Path</label>
+        <input id="raw-path" placeholder="/health">
+        <label>Body (JSON, for POST/PATCH)</label>
+        <textarea id="raw-body" placeholder='{"key": "value"}'></textarea>
+        <button class="btn btn-secondary" onclick="rawApiCall()">Send</button>
+        <div class="log" id="raw-log"></div>
+      </div>
     </div>
   </div>
 
-  <!-- Feed View -->
-  <div id="feedView" class="hidden">
-    <div class="tab-bar">
-      <button class="active" onclick="showTab('swipe')">Feed</button>
-      <button onclick="showTab('saved')">Saved</button>
-    </div>
+  <div id="status"></div>
 
-    <div id="swipeTab">
-      <div id="cardArea"></div>
-      <div id="actions" class="actions hidden">
-        <button class="btn-shop" onclick="act('shop')">Shop</button>
-        <button class="btn-save" onclick="act('save')">Save</button>
-        <button class="btn-skip" onclick="act('scroll_past')">Skip</button>
-        <button class="btn-dislike" onclick="act('dislike')">Dislike</button>
-      </div>
-      <div class="status" id="queueStatus"></div>
-    </div>
+  <script>
+    const API = '';  // Same origin
 
-    <div id="savedTab" class="hidden">
-      <div class="panel" id="savedList"><div class="loading">Loading saved items...</div></div>
-    </div>
-  </div>
-</div>
-
-<script>
-const API = window.location.origin;
-let token = null;
-let currentUserId = null;
-let currentFeedId = null;
-let items = [];
-let itemIndex = 0;
-
-async function api(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (token) opts.headers['Authorization'] = `Bearer ${token}`;
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(API + path, opts);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || res.statusText);
-  return data;
-}
-
-// --- Setup ---
-
-async function loadUsers() {
-  const { users } = await api('GET', '/users');
-  const sel = document.getElementById('userSelect');
-  sel.innerHTML = '<option value="">Pick a user...</option><option value="__new__">+ Create new user</option>';
-  for (const u of users) {
-    sel.innerHTML += `<option value="${u.id}" data-email="${u.email || ''}">${u.name}${u.email ? ` (${u.email})` : ''}</option>`;
-  }
-  sel.onchange = () => {
-    const v = sel.value;
-    document.getElementById('newUserForm').classList.toggle('hidden', v !== '__new__');
-    if (v && v !== '__new__') {
-      currentUserId = Number(v);
-      loadFeeds();
-    } else {
-      document.getElementById('feedPanel').classList.add('hidden');
+    // ── Helpers ──────────────────────────────────────────
+    async function api(method, path, body) {
+      showStatus(`${method} ${path}...`);
+      const opts = { method, headers: {} };
+      if (body && method !== 'GET') {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(`${API}${path}`, opts);
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus(`Error: ${data.error || res.statusText}`, true);
+        throw data;
+      }
+      showStatus(`${method} ${path} — OK`, false);
+      return data;
     }
-  };
-}
 
-async function createNewUser() {
-  const name = document.getElementById('newUserName').value.trim();
-  const email = document.getElementById('newUserEmail').value.trim();
-  if (!name) return alert('Name required');
-  const user = await api('POST', '/users', { name, email: email || undefined });
-  currentUserId = user.id;
-  await loadUsers();
-  document.getElementById('userSelect').value = String(user.id);
-  document.getElementById('newUserForm').classList.add('hidden');
-  loadFeeds();
-}
-
-async function loadFeeds() {
-  const panel = document.getElementById('feedPanel');
-  panel.classList.remove('hidden');
-  const { feeds } = await api('GET', `/feeds?userId=${currentUserId}`);
-  const sel = document.getElementById('feedSelect');
-  sel.innerHTML = '<option value="">Pick a feed...</option><option value="__new__">+ Create new feed</option>';
-  for (const f of feeds) {
-    sel.innerHTML += `<option value="${f.id}">${f.name}${f.relationship ? ` (${f.relationship})` : ''}</option>`;
-  }
-  sel.onchange = () => {
-    const v = sel.value;
-    document.getElementById('newFeedForm').classList.toggle('hidden', v !== '__new__');
-    document.getElementById('startBtn').classList.toggle('hidden', !v || v === '__new__');
-    if (v && v !== '__new__') currentFeedId = Number(v);
-  };
-}
-
-async function createNewFeed() {
-  const name = document.getElementById('feedName').value.trim();
-  const relationship = document.getElementById('feedRelationship').value.trim();
-  const interests = document.getElementById('feedInterests').value.split(',').map(s => s.trim()).filter(Boolean);
-  const budgetMin = document.getElementById('feedBudgetMin').value;
-  const budgetMax = document.getElementById('feedBudgetMax').value;
-  if (!name) return alert('Name required');
-  const feed = await api('POST', '/feeds', {
-    userId: currentUserId,
-    name,
-    relationship: relationship || undefined,
-    interests: interests.length ? interests : undefined,
-    budgetMin: budgetMin ? Number(budgetMin) : undefined,
-    budgetMax: budgetMax ? Number(budgetMax) : undefined,
-  });
-  currentFeedId = feed.id;
-  await loadFeeds();
-  document.getElementById('feedSelect').value = String(feed.id);
-  document.getElementById('newFeedForm').classList.add('hidden');
-  document.getElementById('startBtn').classList.remove('hidden');
-}
-
-async function startFeed() {
-  // Login to get JWT
-  const sel = document.getElementById('userSelect');
-  const opt = sel.options[sel.selectedIndex];
-  const email = opt?.dataset?.email;
-  if (!email) return alert('User needs an email to login. Create a user with an email.');
-  try {
-    const auth = await api('POST', '/auth/login', { email });
-    token = auth.accessToken;
-  } catch (e) {
-    return alert('Login failed: ' + e.message);
-  }
-
-  document.getElementById('setup').classList.add('hidden');
-  document.getElementById('feedView').classList.remove('hidden');
-  await loadBatch();
-}
-
-// --- Feed ---
-
-async function loadBatch() {
-  const area = document.getElementById('cardArea');
-  area.innerHTML = '<div class="loading">Loading gift ideas...</div>';
-  document.getElementById('actions').classList.add('hidden');
-  try {
-    const data = await api('GET', `/feeds/${currentFeedId}/next?count=6`);
-    items = data.items;
-    itemIndex = 0;
-    document.getElementById('queueStatus').textContent = `${data.queueRemaining} more in queue`;
-    showCurrentItem();
-  } catch (e) {
-    area.innerHTML = `<div class="status">No items available. Try again later.</div>`;
-  }
-}
-
-function showCurrentItem() {
-  const area = document.getElementById('cardArea');
-  if (itemIndex >= items.length) {
-    loadBatch();
-    return;
-  }
-  const item = items[itemIndex];
-  const price = item.priceCents != null ? `$${(item.priceCents / 100).toFixed(2)}` : '';
-  const img = item.imageUrl
-    ? `<img src="${item.imageUrl}" alt="" onerror="this.style.display='none'">`
-    : '';
-  area.innerHTML = `
-    <div class="card">
-      ${img}
-      <div class="card-body">
-        ${price ? `<div class="card-price">${price}</div>` : ''}
-        <div class="card-title">${escHtml(item.title)}</div>
-        <div class="card-tags">${(item.tags || []).join(', ')}</div>
-      </div>
-    </div>`;
-  document.getElementById('actions').classList.remove('hidden');
-}
-
-async function act(type) {
-  const item = items[itemIndex];
-  if (!item) return;
-
-  // Disable buttons during request
-  const btns = document.querySelectorAll('.actions button');
-  btns.forEach(b => b.disabled = true);
-
-  try {
-    await api('POST', `/feeds/${currentFeedId}/interactions`, {
-      catalogItemId: item.id,
-      type,
-    });
-
-    if (type === 'shop' && item.buyUrl) {
-      window.open(item.buyUrl, '_blank');
+    function showStatus(msg, isError = false) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = isError ? 'error' : '';
+      el.style.display = 'block';
+      clearTimeout(el._timer);
+      el._timer = setTimeout(() => el.style.display = 'none', 3000);
     }
-  } catch (e) {
-    console.error('Interaction failed:', e);
-  }
 
-  btns.forEach(b => b.disabled = false);
-  itemIndex++;
-  showCurrentItem();
-}
-
-// --- Tabs ---
-
-function showTab(tab) {
-  document.getElementById('swipeTab').classList.toggle('hidden', tab !== 'swipe');
-  document.getElementById('savedTab').classList.toggle('hidden', tab !== 'saved');
-  document.querySelectorAll('.tab-bar button').forEach((b, i) => {
-    b.classList.toggle('active', (i === 0 && tab === 'swipe') || (i === 1 && tab === 'saved'));
-  });
-  if (tab === 'saved') loadSaved();
-}
-
-async function loadSaved() {
-  const list = document.getElementById('savedList');
-  list.innerHTML = '<div class="loading">Loading...</div>';
-  try {
-    const { items: saved } = await api('GET', `/feeds/${currentFeedId}/saved`);
-    if (!saved.length) {
-      list.innerHTML = '<div class="status">No saved items yet.</div>';
-      return;
+    function log(id, msg) {
+      const el = document.getElementById(id);
+      el.style.display = 'block';
+      el.textContent += msg + '\n';
+      el.scrollTop = el.scrollHeight;
     }
-    list.innerHTML = saved.map(item => {
-      const price = item.priceCents != null ? `$${(item.priceCents / 100).toFixed(2)}` : '';
-      const img = item.imageUrl ? `<img src="${item.imageUrl}" alt="">` : '';
-      return `<div class="saved-item" ${item.buyUrl ? `onclick="window.open('${escAttr(item.buyUrl)}','_blank')" style="cursor:pointer"` : ''}>
-        ${img}
-        <div class="saved-item-info">
-          <div class="saved-item-title">${escHtml(item.title)}</div>
-          ${price ? `<div class="saved-item-price">${price}</div>` : ''}
-        </div>
-      </div>`;
-    }).join('');
-  } catch (e) {
-    list.innerHTML = '<div class="status">Failed to load saved items.</div>';
-  }
-}
 
-function escHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s || '';
-  return d.innerHTML;
-}
-function escAttr(s) {
-  return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
+    // ── State ────────────────────────────────────────────
+    let hobbies = [];
+    let users = [];
+    let profiles = [];
+    let sessions = [];
 
-// Boot
-loadUsers();
-</script>
+    // ── 1. Setup ─────────────────────────────────────────
+    async function syncTaxonomy() {
+      const logEl = document.getElementById('taxonomy-log');
+      logEl.textContent = 'Syncing taxonomy from .txt files...\n';
+      logEl.style.display = 'block';
+      try {
+        const data = await api('POST', '/admin/taxonomy/sync');
+        log('taxonomy-log', `Hobbies: ${data.hobbies.inserted} new, ${data.hobbies.total} total`);
+        log('taxonomy-log', `Angles: ${data.angles}, Budget buckets: ${data.budget_buckets}, Occasions: ${data.occasions}`);
+        await loadHobbies();
+      } catch (err) {
+        log('taxonomy-log', `Error: ${JSON.stringify(err)}`);
+      }
+    }
+
+    async function viewTaxonomy() {
+      const logEl = document.getElementById('taxonomy-log');
+      logEl.style.display = 'block';
+      const data = await api('GET', '/admin/taxonomy');
+      logEl.textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function loadHobbies() {
+      hobbies = await api('GET', '/admin/hobbies');
+      const el = document.getElementById('hobby-list');
+      el.innerHTML = hobbies.map(h => `<span class="tag">${h.name}</span>`).join('');
+      // Update hobby selects
+      const sel = document.getElementById('profile-hobbies');
+      sel.innerHTML = hobbies.map(h => `<option value="${h.id}">${h.name}</option>`).join('');
+    }
+
+    async function createUser() {
+      const name = document.getElementById('user-name').value;
+      const email = document.getElementById('user-email').value;
+      await api('POST', '/admin/users', { name, email });
+      await loadUsers();
+    }
+
+    async function loadUsers() {
+      users = await api('GET', '/admin/users');
+      const el = document.getElementById('user-list');
+      el.innerHTML = users.map(u => `<span class="tag">${u.name} (${u.id.slice(0,8)})</span>`).join('');
+      // Update user selects
+      const sel = document.getElementById('profile-user');
+      sel.innerHTML = users.map(u => `<option value="${u.id}">${u.name}</option>`).join('');
+    }
+
+    // ── 2. Precompute ────────────────────────────────────
+    async function runPrecompute() {
+      const logEl = document.getElementById('precompute-log');
+      logEl.textContent = 'Running pre-computation pipeline... (this may take a while)\n';
+      logEl.style.display = 'block';
+      try {
+        const data = await api('POST', '/admin/precompute');
+        log('precompute-log', `Done! Hobbies: ${data.hobbies.total} expansions (${data.hobbies.errors} errors)`);
+        log('precompute-log', `Occasions: ${data.occasions.total} expansions (${data.occasions.errors} errors)`);
+        await loadStats();
+      } catch (err) {
+        log('precompute-log', `Error: ${JSON.stringify(err)}`);
+      }
+    }
+
+    async function loadStats() {
+      const data = await api('GET', '/admin/stats');
+      const el = document.getElementById('stats');
+      el.innerHTML = Object.entries(data).map(([k, v]) =>
+        `<div class="stat"><div class="val">${v}</div><div class="lbl">${k.replace(/_/g, ' ')}</div></div>`
+      ).join('');
+    }
+
+    // ── 3. Profiles ──────────────────────────────────────
+    async function createProfile() {
+      const user_id = document.getElementById('profile-user').value;
+      const label = document.getElementById('profile-label').value;
+      const hobbySelect = document.getElementById('profile-hobbies');
+      const hobby_ids = Array.from(hobbySelect.selectedOptions).map(o => o.value);
+      const budget_min = parseInt(document.getElementById('profile-budget-min').value);
+      const budget_max = parseInt(document.getElementById('profile-budget-max').value);
+
+      if (!user_id) { showStatus('Select a user first', true); return; }
+      if (hobby_ids.length === 0) { showStatus('Select at least one hobby', true); return; }
+
+      await api('POST', '/profiles', { user_id, label, hobby_ids, budget_min, budget_max });
+      await loadProfiles();
+    }
+
+    async function loadProfiles() {
+      profiles = await api('GET', '/admin/profiles');
+      const el = document.getElementById('profile-list');
+      el.innerHTML = profiles.map(p =>
+        `<div class="tag">${p.label} (${p.id.slice(0,8)}) — $${p.budget_min}-$${p.budget_max}</div>`
+      ).join('');
+
+      const sel = document.getElementById('session-profile');
+      sel.innerHTML = profiles.map(p => `<option value="${p.id}">${p.label} (${p.id.slice(0,8)})</option>`).join('');
+    }
+
+    // ── 4. Sessions ──────────────────────────────────────
+    async function startSession() {
+      const profile_id = document.getElementById('session-profile').value;
+      const occasion = document.getElementById('session-occasion').value;
+
+      if (!profile_id) { showStatus('Select a profile first', true); return; }
+
+      await api('POST', '/sessions', { profile_id, occasion });
+      await loadSessions();
+    }
+
+    async function loadSessions() {
+      sessions = await api('GET', '/admin/sessions');
+      const el = document.getElementById('session-info');
+      el.innerHTML = sessions.map(s =>
+        `<span class="tag">${s.id.slice(0,8)} — ${s.occasion}</span>`
+      ).join(' ');
+
+      const sel = document.getElementById('feed-session');
+      sel.innerHTML = sessions.map(s =>
+        `<option value="${s.id}">${s.id.slice(0,8)} — ${s.occasion}</option>`
+      ).join('');
+    }
+
+    // ── 5. Feed ──────────────────────────────────────────
+    async function loadFeed() {
+      const session_id = document.getElementById('feed-session').value;
+      const batch = document.getElementById('feed-batch').value;
+
+      if (!session_id) { showStatus('Start a session first', true); return; }
+
+      const grid = document.getElementById('feed-grid');
+      grid.innerHTML = '<p style="color:#666;padding:20px">Loading feed...</p>';
+
+      try {
+        const data = await api('GET', `/feed/${session_id}?batch=${batch}`);
+        if (data.items.length === 0) {
+          grid.innerHTML = '<p style="color:#888;padding:20px">No items available. Make sure pre-computation has been run and Amazon cache is populated.</p>';
+          return;
+        }
+        grid.innerHTML = data.items.map(item => `
+          <div class="feed-item" data-event-id="${item.feed_event_id}">
+            <img src="${item.image_url || 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22160%22><rect fill=%22%23333%22 width=%22200%22 height=%22160%22/><text x=%2250%25%22 y=%2250%25%22 fill=%22%23666%22 text-anchor=%22middle%22 dy=%22.3em%22>No Image</text></svg>'}"
+                 alt="${escapeHtml(item.title)}" loading="lazy">
+            <div class="info">
+              <div class="title">${escapeHtml(item.title)}</div>
+              <div class="price">$${(item.price || 0).toFixed(2)}</div>
+              <div class="meta">${item.asin} &middot; score: ${(item.score || 0).toFixed(2)}</div>
+              <span class="slot-badge slot-${item.slot_type}">${item.slot_type}</span>
+              ${item.angle ? `<span class="slot-badge" style="background:#333;color:#888">${item.angle}</span>` : ''}
+            </div>
+            <div class="signal-btns">
+              <button class="btn btn-secondary" onclick="sendSignal('${item.feed_event_id}','skip',this)">Skip</button>
+              <button class="btn btn-success" onclick="sendSignal('${item.feed_event_id}','save',this)">Save</button>
+              <button class="btn btn-primary" onclick="window.open('${item.product_url}','_blank');sendSignal('${item.feed_event_id}','shop_now',this)">Shop</button>
+              <button class="btn btn-danger" onclick="sendSignal('${item.feed_event_id}','dislike',this)">Dislike</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (err) {
+        grid.innerHTML = `<p style="color:#fca5a5;padding:20px">Error: ${err.error || err.message || JSON.stringify(err)}</p>`;
+      }
+    }
+
+    async function sendSignal(feedEventId, signal, btn) {
+      try {
+        await api('POST', '/feed/signal', { feed_event_id: feedEventId, signal });
+        // Visually mark the item
+        const item = btn.closest('.feed-item');
+        item.style.opacity = '0.4';
+        const btns = item.querySelectorAll('.signal-btns .btn');
+        btns.forEach(b => b.disabled = true);
+        showStatus(`Signal "${signal}" recorded`);
+      } catch (err) {
+        showStatus(`Signal error: ${err.error || err.message}`, true);
+      }
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── API Usage ────────────────────────────────────────
+    async function loadApiUsage() {
+      const data = await api('GET', '/admin/api-usage');
+      const el = document.getElementById('api-usage');
+      el.innerHTML = `
+        <div class="stat"><div class="val">${data.count}</div><div class="lbl">calls today</div></div>
+        <div class="stat"><div class="val">${data.limit}</div><div class="lbl">daily limit</div></div>
+        <div class="stat"><div class="val">${((data.count / data.limit) * 100).toFixed(1)}%</div><div class="lbl">used</div></div>
+      `;
+    }
+
+    // ── Raw API ──────────────────────────────────────────
+    async function rawApiCall() {
+      const method = document.getElementById('raw-method').value;
+      const path = document.getElementById('raw-path').value;
+      const bodyStr = document.getElementById('raw-body').value;
+      const logEl = document.getElementById('raw-log');
+
+      let body = null;
+      if (bodyStr && method !== 'GET') {
+        try { body = JSON.parse(bodyStr); } catch { logEl.textContent = 'Invalid JSON body'; return; }
+      }
+
+      try {
+        const data = await api(method, path, body);
+        logEl.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        logEl.textContent = JSON.stringify(err, null, 2);
+        logEl.classList.add('error');
+      }
+    }
+
+    // ── Init ─────────────────────────────────────────────
+    (async function init() {
+      try {
+        await Promise.all([loadHobbies(), loadUsers(), loadStats()]);
+        await Promise.all([loadProfiles(), loadSessions()]);
+      } catch (err) {
+        console.error('Init error:', err);
+        showStatus('Server not reachable — start with: npm run start:api', true);
+      }
+    })();
+  </script>
 </body>
 </html>
