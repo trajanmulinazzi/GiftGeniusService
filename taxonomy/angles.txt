@@ -1,0 +1,6 @@
+consumable|consumable supplies, refills, and raw materials used in the hobby
+skill|tools and equipment that improve technique
+experience|classes, subscriptions, events, and memberships
+aesthetic|style-driven, design-focused items in the space
+social|gifts centered on shared or hosted group activities
+wildcard|lateral associations — non-obvious, creative connections

@@ -1,0 +1,8 @@
+birthday
+christmas
+mothers_day
+fathers_day
+anniversary
+graduation
+housewarming
+just_because

@@ -1,67 +1,109 @@
 #!/usr/bin/env bash
 
-# GiftGenius test command cookbook
-# Run from repo root: /Users/trajan/giftgenius-engine
+# GiftGenius Engine — test command cookbook
+# Run from repo root
+
+BASE="http://127.0.0.1:3000"
 
 # -----------------------------------------------------------------------------
-# API server checks
+# Server
 # -----------------------------------------------------------------------------
 
-# Start the Fastify API server (health + users/feeds routes)
-npm run start:api
+# Start API server
+# npm run start:api
 
-# Check API health (DB reachable)
-curl -s http://127.0.0.1:3000/health
+# Health check
+curl -s "$BASE/health" | jq .
 
-# List users from API
-curl -s http://127.0.0.1:3000/users
+# -----------------------------------------------------------------------------
+# Setup: taxonomy + users
+# -----------------------------------------------------------------------------
 
-# Create a user via API
-curl -s -X POST http://127.0.0.1:3000/users \
+# Sync hobbies/angles/occasions from taxonomy/*.txt into Supabase
+curl -s -X POST "$BASE/admin/taxonomy/sync" | jq .
+
+# View taxonomy config (from .txt files, not DB)
+curl -s "$BASE/admin/taxonomy" | jq .
+
+# List hobbies in DB
+curl -s "$BASE/admin/hobbies" | jq .
+
+# Create a test user
+curl -s -X POST "$BASE/admin/users" \
   -H "content-type: application/json" \
-  -d '{"name":"Api Test User","email":"api-test@example.com"}'
+  -d '{"name":"Test User","email":"test@example.com"}' | jq .
 
-# Create a feed via API (replace userId with a real user id)
-curl -s -X POST http://127.0.0.1:3000/feeds \
+# List users
+curl -s "$BASE/admin/users" | jq .
+
+# -----------------------------------------------------------------------------
+# Pre-computation (run once after taxonomy sync)
+# -----------------------------------------------------------------------------
+
+# Run full Claude pre-computation pipeline (hobby×angle + occasion expansions)
+# WARNING: 200 hobbies × 6 angles = 1200 Claude calls. Trim hobbies.txt first.
+curl -s -X POST "$BASE/admin/precompute" | jq .
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+
+# Create a profile (replace user_id and hobby_ids with real UUIDs)
+curl -s -X POST "$BASE/profiles" \
   -H "content-type: application/json" \
-  -d '{"userId":1,"name":"Mom","relationship":"mom","interests":["reading","hiking"],"budgetMin":10,"budgetMax":100}'
+  -d '{
+    "user_id": "USER_UUID_HERE",
+    "label": "Mom",
+    "hobby_ids": ["HOBBY_UUID_1", "HOBBY_UUID_2"],
+    "budget_min": 25,
+    "budget_max": 100
+  }' | jq .
 
-# List feeds for one user (replace userId)
-curl -s "http://127.0.0.1:3000/feeds?userId=1"
-
-# -----------------------------------------------------------------------------
-# CLI flow checks
-# -----------------------------------------------------------------------------
-
-# Run the interactive CLI recommendation loop
-npm start
-
-# List most recent catalog items in DB
-npm run list-catalog
-
-# List most recent queued items in DB
-npm run list-queue
+# Get profile with weights
+# curl -s "$BASE/profiles/PROFILE_UUID" | jq .
 
 # -----------------------------------------------------------------------------
-# Amazon API debug checks
+# Sessions + Feed
 # -----------------------------------------------------------------------------
 
-# Raw SearchItems response for a keyword phrase
-npm run amazon:response "hiking gift for men"
+# Start a session
+curl -s -X POST "$BASE/sessions" \
+  -H "content-type: application/json" \
+  -d '{
+    "profile_id": "PROFILE_UUID_HERE",
+    "occasion": "birthday"
+  }' | jq .
 
-# Raw GetItems response for one ASIN
-npm run amazon:item-response B073CVZ9GZ
+# Get feed (replace session_id)
+# curl -s "$BASE/feed/SESSION_UUID?batch=10" | jq .
 
-# Ingest a small Amazon batch into catalog
-npm run ingest -- --amazon
+# Send a signal
+# curl -s -X POST "$BASE/feed/signal" \
+#   -H "content-type: application/json" \
+#   -d '{"feed_event_id":"EVENT_UUID","signal":"save"}' | jq .
 
 # -----------------------------------------------------------------------------
-# Direct DB inspection helpers (advanced)
+# Admin / monitoring
 # -----------------------------------------------------------------------------
 
-# Show feeds and tag weights for one user name (replace "Test2")
-node -e "import('./db/index.js').then(async ({ getDb }) => { const db = await getDb(); const res = await db.query(\"SELECT f.id, u.name AS user_name, f.name AS feed_name, f.relationship, f.tag_weights FROM feeds f JOIN users u ON u.id = f.user_id WHERE u.name = \$1 ORDER BY f.id DESC\", ['Test2']); console.log(JSON.stringify(res.rows, null, 2)); process.exit(0); }).catch((e) => { console.error(e); process.exit(1); });"
+# System stats
+curl -s "$BASE/admin/stats" | jq .
 
-# Show recent interactions and item tags for a feed id (replace 5)
-node -e "import('./db/index.js').then(async ({ getDb }) => { const db = await getDb(); const res = await db.query(\"SELECT i.id, i.type, c.source_id, c.title, c.tags FROM interactions i JOIN catalog c ON c.id = i.catalog_item_id WHERE i.feed_id = \$1 ORDER BY i.id DESC LIMIT 20\", [5]); console.log(JSON.stringify(res.rows, null, 2)); process.exit(0); }).catch((e) => { console.error(e); process.exit(1); });"
+# Amazon API usage today
+curl -s "$BASE/admin/api-usage" | jq .
 
+# Manual cache refresh
+# curl -s -X POST "$BASE/admin/cache/refresh" | jq .
+
+# -----------------------------------------------------------------------------
+# Data management
+# -----------------------------------------------------------------------------
+
+# Clear all data (keeps schema)
+# node scripts/clear-data.js
+
+# Clear data but keep hobbies + precomputed search terms
+# node scripts/clear-data.js --keep-hobbies
+
+# Re-run schema migration
+# node scripts/migrate.js

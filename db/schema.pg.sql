@@ -1,113 +1,227 @@
--- GiftGenius Engine - PostgreSQL schema
--- Defines tables: catalog, users, feeds, interactions
--- Run with: psql -U giftgenius -d giftgenius -f db/schema.pg.sql
--- Or via docker: docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql
+-- GiftGenius Engine — Full PostgreSQL Schema (HLA v2)
+-- Run via Supabase Dashboard SQL Editor
 
--- Shared product catalog (source of truth)
-CREATE TABLE IF NOT EXISTS catalog (
-  id SERIAL PRIMARY KEY,
-  source_id TEXT NOT NULL,
-  source TEXT NOT NULL,
-  title TEXT NOT NULL,
-  image_url TEXT,
-  price_cents INTEGER,
-  currency TEXT DEFAULT 'USD',
-  buy_url TEXT,
-  tags TEXT NOT NULL DEFAULT '[]',
-  rating NUMERIC(3,2),
-  reviews_count INTEGER,
-  active INTEGER NOT NULL DEFAULT 1,
-  last_refreshed TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  times_shown INTEGER NOT NULL DEFAULT 0,
-  times_liked INTEGER NOT NULL DEFAULT 0,
-  last_shown_at TIMESTAMPTZ,
-  UNIQUE(source, source_id)
+-- Drop old tables if upgrading from v1
+DROP TABLE IF EXISTS queue_items CASCADE;
+DROP TABLE IF EXISTS seen_items CASCADE;
+DROP TABLE IF EXISTS interactions CASCADE;
+DROP TABLE IF EXISTS feeds CASCADE;
+DROP TABLE IF EXISTS hobby_searches CASCADE;
+DROP TABLE IF EXISTS catalog CASCADE;
+DROP TABLE IF EXISTS feed_events CASCADE;
+DROP TABLE IF EXISTS sessions CASCADE;
+DROP TABLE IF EXISTS dislike_suppressions CASCADE;
+DROP TABLE IF EXISTS profile_weights CASCADE;
+DROP TABLE IF EXISTS profiles CASCADE;
+DROP TABLE IF EXISTS cross_hobby_expansions CASCADE;
+DROP TABLE IF EXISTS amazon_cache CASCADE;
+DROP TABLE IF EXISTS api_call_tracking CASCADE;
+DROP TABLE IF EXISTS occasion_search_terms CASCADE;
+DROP TABLE IF EXISTS hobby_angle_expansions CASCADE;
+DROP TABLE IF EXISTS hobbies CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+-- ============================================================
+-- 1. Reference Tables (static, pre-populated)
+-- ============================================================
+
+CREATE TABLE hobbies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  slug TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Migration: add columns if upgrading from older schema
-ALTER TABLE catalog ADD COLUMN IF NOT EXISTS times_shown INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE catalog ADD COLUMN IF NOT EXISTS times_liked INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE catalog ADD COLUMN IF NOT EXISTS last_shown_at TIMESTAMPTZ;
-ALTER TABLE catalog ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2);
-ALTER TABLE catalog ADD COLUMN IF NOT EXISTS reviews_count INTEGER;
+CREATE TABLE hobby_angle_expansions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  hobby_id UUID REFERENCES hobbies(id) ON DELETE CASCADE,
+  angle TEXT NOT NULL CHECK (angle IN ('consumable','skill','experience','aesthetic','social','wildcard')),
+  search_terms JSONB NOT NULL,
+  computed_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(hobby_id, angle)
+);
 
-CREATE INDEX IF NOT EXISTS idx_catalog_source ON catalog(source);
-CREATE INDEX IF NOT EXISTS idx_catalog_active ON catalog(active);
-CREATE INDEX IF NOT EXISTS idx_catalog_price ON catalog(price_cents);
+CREATE TABLE occasion_search_terms (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  occasion TEXT NOT NULL,
+  budget_bucket TEXT NOT NULL,
+  search_terms JSONB NOT NULL,
+  computed_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(occasion, budget_bucket)
+);
 
--- Users: app users (gift-givers), each with multiple feeds (recipients)
-CREATE TABLE IF NOT EXISTS users (
-  id SERIAL PRIMARY KEY,
+CREATE TABLE cross_hobby_expansions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  combo_key TEXT NOT NULL UNIQUE,
+  search_terms JSONB NOT NULL,
+  computed_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- ============================================================
+-- 2. Caching Tables
+-- ============================================================
+
+CREATE TABLE amazon_cache (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cache_key TEXT NOT NULL UNIQUE,
+  search_term TEXT NOT NULL,
+  budget_bucket TEXT NOT NULL,
+  items JSONB NOT NULL,
+  cached_at TIMESTAMPTZ DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  hit_count INT DEFAULT 0
+);
+
+CREATE INDEX idx_amazon_cache_expires ON amazon_cache(expires_at);
+CREATE INDEX idx_amazon_cache_key ON amazon_cache(cache_key);
+
+CREATE TABLE api_call_tracking (
+  date_key DATE PRIMARY KEY DEFAULT CURRENT_DATE,
+  call_count INT DEFAULT 0
+);
+
+-- ============================================================
+-- 3. User & Profile Tables
+-- ============================================================
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
-  email TEXT,
+  email TEXT UNIQUE,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Feeds: personalized recommendation contexts (one per recipient in user's life)
-CREATE TABLE IF NOT EXISTS feeds (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  name TEXT NOT NULL,
-  age_min INTEGER,
-  age_max INTEGER,
-  relationship TEXT,
-  interests TEXT NOT NULL DEFAULT '[]',
-  budget_min DOUBLE PRECISION,
-  budget_max DOUBLE PRECISION,
-  occasion TEXT,
-  tag_weights TEXT NOT NULL DEFAULT '{}',
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-
--- Migration: add user_id to feeds for existing schemas
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'feeds' AND column_name = 'user_id') THEN
-    INSERT INTO users (name) SELECT 'Default User' WHERE NOT EXISTS (SELECT 1 FROM users LIMIT 1);
-    ALTER TABLE feeds ADD COLUMN user_id INTEGER REFERENCES users(id);
-    UPDATE feeds SET user_id = (SELECT id FROM users ORDER BY id LIMIT 1) WHERE user_id IS NULL;
-    ALTER TABLE feeds ALTER COLUMN user_id SET NOT NULL;
-  END IF;
-EXCEPTION WHEN OTHERS THEN
-  NULL; -- Ignore if already migrated
-END $$;
-
-CREATE INDEX IF NOT EXISTS idx_feeds_user ON feeds(user_id);
-
--- Interactions: what the user did with each item (learning signal)
-CREATE TABLE IF NOT EXISTS interactions (
-  id SERIAL PRIMARY KEY,
-  feed_id INTEGER NOT NULL REFERENCES feeds(id),
-  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
-  type TEXT NOT NULL CHECK (type IN ('like', 'pass', 'save')),
+CREATE TABLE profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  hobby_ids UUID[] NOT NULL,
+  budget_min INT NOT NULL,
+  budget_max INT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT now(),
-  UNIQUE(feed_id, catalog_item_id)
+  updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_interactions_feed ON interactions(feed_id);
-CREATE INDEX IF NOT EXISTS idx_interactions_catalog ON interactions(catalog_item_id);
-
--- Seen items: records which catalog items were already served to a feed.
--- Prevents re-serving duplicates even before an explicit interaction is sent.
-CREATE TABLE IF NOT EXISTS seen_items (
-  id SERIAL PRIMARY KEY,
-  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
-  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
-  seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(feed_id, catalog_item_id)
+CREATE TABLE profile_weights (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  hobby_id UUID REFERENCES hobbies(id),
+  angle TEXT NOT NULL,
+  weight FLOAT NOT NULL DEFAULT 1.0,
+  consecutive_shown INT DEFAULT 0,
+  cooldown_until TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(profile_id, hobby_id, angle)
 );
 
-CREATE INDEX IF NOT EXISTS idx_seen_items_feed ON seen_items(feed_id);
-CREATE INDEX IF NOT EXISTS idx_seen_items_catalog ON seen_items(catalog_item_id);
-
--- Per-feed persisted queue (~6 items); refill when ≤3 remain
-CREATE TABLE IF NOT EXISTS queue_items (
-  id SERIAL PRIMARY KEY,
-  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
-  catalog_item_id INTEGER NOT NULL REFERENCES catalog(id),
+CREATE TABLE dislike_suppressions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  suppression_type TEXT NOT NULL CHECK (suppression_type IN ('item','cluster')),
+  item_asin TEXT,
+  hobby_id UUID,
+  angle TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_queue_items_feed ON queue_items(feed_id);
+-- ============================================================
+-- 4. Session & Feed Tables
+-- ============================================================
+
+CREATE TABLE sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  occasion TEXT NOT NULL,
+  started_at TIMESTAMPTZ DEFAULT now(),
+  ended_at TIMESTAMPTZ
+);
+
+CREATE TABLE feed_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+  profile_id UUID REFERENCES profiles(id),
+  item_asin TEXT NOT NULL,
+  item_snapshot JSONB NOT NULL,
+  hobby_id UUID,
+  angle TEXT,
+  slot_type TEXT NOT NULL CHECK (slot_type IN ('interest','adjacent','wildcard','occasion')),
+  signal TEXT CHECK (signal IN ('skip','save','shop_now','dislike')),
+  served_at TIMESTAMPTZ DEFAULT now(),
+  acted_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_feed_events_profile ON feed_events(profile_id);
+CREATE INDEX idx_feed_events_asin ON feed_events(item_asin);
+CREATE INDEX idx_feed_events_session ON feed_events(session_id);
+
+-- ============================================================
+-- 5. RPC Functions (called via supabase.rpc() from JS client)
+-- ============================================================
+
+-- Increment amazon_cache hit count
+CREATE OR REPLACE FUNCTION increment_cache_hit(p_cache_key TEXT)
+RETURNS VOID AS $$
+  UPDATE amazon_cache SET hit_count = hit_count + 1 WHERE cache_key = p_cache_key;
+$$ LANGUAGE sql;
+
+-- Get or init daily API call count, returns current count
+CREATE OR REPLACE FUNCTION get_daily_call_count(p_date DATE)
+RETURNS INT AS $$
+  INSERT INTO api_call_tracking (date_key, call_count) VALUES (p_date, 0)
+  ON CONFLICT (date_key) DO NOTHING;
+  SELECT call_count FROM api_call_tracking WHERE date_key = p_date;
+$$ LANGUAGE sql;
+
+-- Increment daily API call count, returns new count
+CREATE OR REPLACE FUNCTION increment_daily_calls(p_date DATE)
+RETURNS INT AS $$
+  INSERT INTO api_call_tracking (date_key, call_count) VALUES (p_date, 1)
+  ON CONFLICT (date_key) DO UPDATE SET call_count = api_call_tracking.call_count + 1;
+  SELECT call_count FROM api_call_tracking WHERE date_key = p_date;
+$$ LANGUAGE sql;
+
+-- Adjust profile weight with floor/ceiling
+CREATE OR REPLACE FUNCTION adjust_weight(
+  p_profile_id UUID, p_hobby_id UUID, p_angle TEXT,
+  p_delta FLOAT, p_floor FLOAT, p_ceiling FLOAT
+) RETURNS VOID AS $$
+  UPDATE profile_weights
+  SET weight = GREATEST(LEAST(weight + p_delta, p_ceiling), p_floor),
+      updated_at = now()
+  WHERE profile_id = p_profile_id AND hobby_id = p_hobby_id AND angle = p_angle;
+$$ LANGUAGE sql;
+
+-- Set weight to exact value (for dislike → 0.0)
+CREATE OR REPLACE FUNCTION set_weight(
+  p_profile_id UUID, p_hobby_id UUID, p_angle TEXT, p_weight FLOAT
+) RETURNS VOID AS $$
+  UPDATE profile_weights
+  SET weight = p_weight, updated_at = now()
+  WHERE profile_id = p_profile_id AND hobby_id = p_hobby_id AND angle = p_angle;
+$$ LANGUAGE sql;
+
+-- Set weight + cooldown (for shop_now)
+CREATE OR REPLACE FUNCTION adjust_weight_with_cooldown(
+  p_profile_id UUID, p_hobby_id UUID, p_angle TEXT,
+  p_delta FLOAT, p_ceiling FLOAT, p_cooldown_days INT
+) RETURNS VOID AS $$
+  UPDATE profile_weights
+  SET weight = LEAST(weight + p_delta, p_ceiling),
+      cooldown_until = now() + (p_cooldown_days || ' days')::interval,
+      updated_at = now()
+  WHERE profile_id = p_profile_id AND hobby_id = p_hobby_id AND angle = p_angle;
+$$ LANGUAGE sql;
+
+-- Weight decay: drift all stale weights 2% toward 1.0
+CREATE OR REPLACE FUNCTION apply_weight_decay()
+RETURNS INT AS $$
+  WITH updated AS (
+    UPDATE profile_weights
+    SET weight = weight + (1.0 - weight) * 0.02,
+        updated_at = now()
+    WHERE updated_at < now() - interval '1 day'
+    RETURNING id
+  )
+  SELECT COUNT(*)::int FROM updated;
+$$ LANGUAGE sql;
