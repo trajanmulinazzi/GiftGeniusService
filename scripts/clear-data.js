@@ -9,24 +9,26 @@ config();
 import { getDb } from "../db/index.js";
 
 // Order matters: children before parents (FK constraints)
+// Each entry: [table_name, pk_column]
 const TABLES = [
-  "feed_events",
-  "sessions",
-  "dislike_suppressions",
-  "profile_weights",
-  "profiles",
-  "amazon_cache",
-  "api_call_tracking",
-  "cross_hobby_expansions",
-  "occasion_search_terms",
-  "hobby_angle_expansions",
-  "hobbies",
-  "users",
+  ["feed_events", "id"],
+  ["sessions", "id"],
+  ["dislike_suppressions", "id"],
+  ["profile_weights", "id"],
+  ["profiles", "id"],
+  ["amazon_cache", "id"],
+  ["api_call_tracking", "date_key"],
+  ["cross_hobby_expansions", "id"],
+  ["occasion_search_terms", "id"],
+  ["hobby_angle_expansions", "id"],
+  ["hobbies", "id"],
+  ["users", "id"],
 ];
 
 const sb = getDb();
-for (const table of TABLES) {
-  const { error } = await sb.from(table).delete().gte("created_at", "1970-01-01");
+for (const [table, pk] of TABLES) {
+  // Supabase delete() requires a filter — use "pk is not null" to match all rows
+  const { error } = await sb.from(table).delete().not(pk, "is", null);
   if (error) console.error(`Error clearing ${table}:`, error.message);
   else console.log(`Cleared ${table}`);
 }

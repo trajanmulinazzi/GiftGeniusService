@@ -4,13 +4,18 @@
 
 import { getDb } from '../db/index.js';
 import { loadAngles } from '../services/taxonomy.js';
+import { createProfileSchema, updateProfileSchema, validate } from './schemas.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
 export default async function profileRoutes(fastify) {
+  // All profile routes require authentication
+  fastify.addHook('onRequest', fastify.authenticate);
+
   // POST /profiles — Create a new recipient profile
   fastify.post('/profiles', async (request, reply) => {
-    const { user_id, label, hobby_ids, budget_min, budget_max } = request.body;
+    const { label, hobby_ids, budget_min, budget_max } = validate(createProfileSchema, request.body);
+    const user_id = request.user.id;
     const sb = getDb();
 
     const { data: profile, error } = await sb
@@ -45,7 +50,8 @@ export default async function profileRoutes(fastify) {
 
     const { data: profile, error } = await sb
       .from('profiles').select('*').eq('id', id).single();
-    if (error) return reply.code(404).send({ error: 'Profile not found' });
+    if (error || !profile) return reply.code(404).send({ error: 'Profile not found' });
+    if (profile.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
 
     const { data: weightsData } = await sb
       .from('profile_weights')
@@ -66,7 +72,13 @@ export default async function profileRoutes(fastify) {
   fastify.patch('/profiles/:id', async (request, reply) => {
     const sb = getDb();
     const { id } = request.params;
-    const { hobby_ids, budget_min, budget_max, label } = request.body;
+
+    // Verify ownership
+    const { data: existing } = await sb.from('profiles').select('user_id').eq('id', id).single();
+    if (!existing) return reply.code(404).send({ error: 'Profile not found' });
+    if (existing.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+
+    const { hobby_ids, budget_min, budget_max, label } = validate(updateProfileSchema, request.body);
 
     const updates = { updated_at: new Date().toISOString() };
     if (hobby_ids !== undefined) updates.hobby_ids = hobby_ids;

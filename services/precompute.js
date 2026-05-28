@@ -11,6 +11,27 @@ const ALL_ANGLES = loadAngles().map(a => a.name);
 const ALL_OCCASIONS = loadOccasions();
 const ALL_BUDGET_BUCKETS = loadBudgetBuckets();
 
+const BATCH_SIZE = 10;
+const BATCH_DELAY_MS = 1000;
+
+/** Run tasks in batches of `size` with a delay between batches. */
+async function runBatched(tasks, size, delayMs) {
+  let completed = 0;
+  let errors = 0;
+  for (let i = 0; i < tasks.length; i += size) {
+    const batch = tasks.slice(i, i + size);
+    const results = await Promise.allSettled(batch.map(t => t()));
+    for (const r of results) {
+      if (r.status === 'fulfilled') completed++;
+      else errors++;
+    }
+    if (i + size < tasks.length) {
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  return { completed, errors };
+}
+
 /**
  * Step 1 — Expand Hobby × Angle Matrix (§5.1)
  */
@@ -18,52 +39,36 @@ export async function expandAllHobbyAngles() {
   const sb = getDb();
   const { data: hobbies } = await sb.from('hobbies').select('id, name').order('name');
 
-  let total = 0;
-  let errors = 0;
+  let skipped = 0;
+  const tasks = [];
 
-  for (let i = 0; i < hobbies.length; i += 10) {
-    const batch = hobbies.slice(i, i + 10);
-    const promises = [];
+  for (const hobby of hobbies) {
+    for (const angle of ALL_ANGLES) {
+      const { data: existing } = await sb
+        .from('hobby_angle_expansions')
+        .select('id')
+        .eq('hobby_id', hobby.id)
+        .eq('angle', angle)
+        .maybeSingle();
 
-    for (const hobby of batch) {
-      for (const angle of ALL_ANGLES) {
-        // Check if already computed
-        const { data: existing } = await sb
-          .from('hobby_angle_expansions')
-          .select('id')
-          .eq('hobby_id', hobby.id)
-          .eq('angle', angle)
-          .maybeSingle();
+      if (existing) { skipped++; continue; }
 
-        if (existing) { total++; continue; }
-
-        promises.push(
-          expandHobbyAngle(hobby.name, angle)
-            .then(async (terms) => {
-              await sb.from('hobby_angle_expansions').upsert({
-                hobby_id: hobby.id,
-                angle,
-                search_terms: terms,
-                computed_at: new Date().toISOString(),
-              }, { onConflict: 'hobby_id,angle' });
-              total++;
-              console.log(`[Precompute] ${hobby.name} × ${angle}: ${terms.length} terms`);
-            })
-            .catch(err => {
-              errors++;
-              console.error(`[Precompute] Error for ${hobby.name} × ${angle}:`, err.message);
-            })
-        );
-      }
-    }
-
-    if (promises.length > 0) {
-      await Promise.all(promises);
-      await new Promise(r => setTimeout(r, 1000));
+      tasks.push(async () => {
+        const terms = await expandHobbyAngle(hobby.name, angle);
+        await sb.from('hobby_angle_expansions').upsert({
+          hobby_id: hobby.id,
+          angle,
+          search_terms: terms,
+          computed_at: new Date().toISOString(),
+        }, { onConflict: 'hobby_id,angle' });
+        console.log(`[Precompute] ${hobby.name} × ${angle}: ${terms.length} terms`);
+      });
     }
   }
 
-  console.log(`[Precompute] Hobby×Angle complete: ${total} expansions, ${errors} errors`);
+  const { completed, errors } = await runBatched(tasks, BATCH_SIZE, BATCH_DELAY_MS);
+  const total = skipped + completed;
+  console.log(`[Precompute] Hobby×Angle complete: ${total} expansions (${skipped} cached), ${errors} errors`);
   return { total, errors };
 }
 
@@ -72,11 +77,11 @@ export async function expandAllHobbyAngles() {
  */
 export async function expandAllOccasions() {
   const sb = getDb();
-  let total = 0;
-  let errors = 0;
+  let skipped = 0;
+  const tasks = [];
 
   for (const occasion of ALL_OCCASIONS) {
-    const promises = ALL_BUDGET_BUCKETS.map(async (bucket) => {
+    for (const bucket of ALL_BUDGET_BUCKETS) {
       const { data: existing } = await sb
         .from('occasion_search_terms')
         .select('id')
@@ -84,9 +89,9 @@ export async function expandAllOccasions() {
         .eq('budget_bucket', bucket)
         .maybeSingle();
 
-      if (existing) { total++; return; }
+      if (existing) { skipped++; continue; }
 
-      try {
+      tasks.push(async () => {
         const terms = await expandOccasion(occasion, bucket);
         await sb.from('occasion_search_terms').upsert({
           occasion,
@@ -94,19 +99,14 @@ export async function expandAllOccasions() {
           search_terms: terms,
           computed_at: new Date().toISOString(),
         }, { onConflict: 'occasion,budget_bucket' });
-        total++;
         console.log(`[Precompute] ${occasion} × $${bucket}: ${terms.length} terms`);
-      } catch (err) {
-        errors++;
-        console.error(`[Precompute] Error for ${occasion} × $${bucket}:`, err.message);
-      }
-    });
-
-    await Promise.all(promises);
-    await new Promise(r => setTimeout(r, 500));
+      });
+    }
   }
 
-  console.log(`[Precompute] Occasions complete: ${total} expansions, ${errors} errors`);
+  const { completed, errors } = await runBatched(tasks, BATCH_SIZE, BATCH_DELAY_MS);
+  const total = skipped + completed;
+  console.log(`[Precompute] Occasions complete: ${total} expansions (${skipped} cached), ${errors} errors`);
   return { total, errors };
 }
 

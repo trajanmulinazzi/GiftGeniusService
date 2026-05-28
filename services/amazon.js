@@ -20,6 +20,9 @@ const DAILY_CALL_LIMIT = 8500;
 const DAILY_CALL_ALERT = 7500;
 const CACHE_TTL_HOURS = 48;
 const MARKETPLACE = 'www.amazon.com';
+const MIN_REQUEST_INTERVAL_MS = 1200; // slightly over 1 TPS to stay safely under PA-API limit
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 2000; // exponential backoff: 2s, 4s, 8s
 
 const SEARCH_RESOURCES = [
   'images.primary.medium',
@@ -73,7 +76,20 @@ async function incrementDailyCallCount() {
   return count;
 }
 
-// ── Raw Amazon API Call ───────────────────────────────────
+// ── Rate Limiter (queue-based for concurrent safety) ─────
+let _nextAvailableTime = 0;
+
+async function throttle() {
+  const now = Date.now();
+  const myTurn = Math.max(now, _nextAvailableTime);
+  _nextAvailableTime = myTurn + MIN_REQUEST_INTERVAL_MS;
+  const waitMs = myTurn - now;
+  if (waitMs > 0) {
+    await new Promise(r => setTimeout(r, waitMs));
+  }
+}
+
+// ── Raw Amazon API Call (with retry + backoff) ───────────
 async function callAmazonAPI(searchTerm, minPrice, maxPrice) {
   const api = getApi();
   const req = new SearchItemsRequestContent();
@@ -84,17 +100,30 @@ async function callAmazonAPI(searchTerm, minPrice, maxPrice) {
   if (maxPrice < 9999) req.maxPrice = maxPrice * 100;
   req.resources = SEARCH_RESOURCES;
 
-  const response = await api.searchItems(MARKETPLACE, { searchItemsRequestContent: req });
-
-  return (response?.searchResult?.items ?? []).map(item => ({
-    asin: item.asin,
-    title: item.itemInfo?.title?.displayValue ?? '',
-    price: extractPrice(item),
-    image_url: item.images?.primary?.medium?.url ?? '',
-    product_url: item.detailPageURL ?? `https://www.amazon.com/dp/${item.asin}?tag=${process.env.AMAZON_PARTNER_TAG}`,
-    category: item.itemInfo?.classifications?.binding?.displayValue ?? 'General',
-    fetched_at: new Date().toISOString(),
-  }));
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    await throttle();
+    try {
+      const response = await api.searchItems(MARKETPLACE, { searchItemsRequestContent: req });
+      return (response?.searchResult?.items ?? []).map(item => ({
+        asin: item.asin,
+        title: item.itemInfo?.title?.displayValue ?? '',
+        price: extractPrice(item),
+        image_url: item.images?.primary?.medium?.url ?? '',
+        product_url: item.detailPageURL ?? `https://www.amazon.com/dp/${item.asin}?tag=${process.env.AMAZON_PARTNER_TAG}`,
+        category: item.itemInfo?.classifications?.binding?.displayValue ?? 'General',
+        fetched_at: new Date().toISOString(),
+      }));
+    } catch (err) {
+      const status = err.statusCode ?? err.status ?? err.$metadata?.httpStatusCode;
+      if (status === 429 && attempt < MAX_RETRIES) {
+        const backoff = RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(`[Amazon] 429 for "${searchTerm}", retrying in ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 function extractPrice(item) {
@@ -185,7 +214,6 @@ export async function refreshExpiringCache() {
     } catch (err) {
       console.error(`[Amazon] Refresh error for "${row.search_term}":`, err.message ?? err);
     }
-    await new Promise(r => setTimeout(r, 200));
   }
 
   console.log(`[Amazon] Cache refresh: ${refreshed}/${(expiring ?? []).length} entries`);

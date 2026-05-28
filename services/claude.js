@@ -8,11 +8,18 @@ import { getAngleDefinitions } from './taxonomy.js';
 
 const ANGLE_DEFINITIONS = getAngleDefinitions();
 
+const MODEL = 'claude-sonnet-4-6';
+
 let _client = null;
 function getClient() {
   if (_client) return _client;
   _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   return _client;
+}
+
+function parseJsonResponse(text) {
+  const cleaned = text.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/, '').trim();
+  return JSON.parse(cleaned);
 }
 
 /**
@@ -40,13 +47,13 @@ Rules:
 Example output: ["japanese chef knife set","mandoline slicer with safety guard","cast iron spice grinder"]`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
   });
 
   const text = response.content[0].text.trim();
-  return JSON.parse(text);
+  return parseJsonResponse(text);
 }
 
 /**
@@ -64,13 +71,13 @@ Budget bucket: $${budgetBucket}
 Return ONLY a JSON array of strings.`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
   });
 
   const text = response.content[0].text.trim();
-  return JSON.parse(text);
+  return parseJsonResponse(text);
 }
 
 /**
@@ -85,12 +92,12 @@ These should be non-obvious — items they wouldn't find just searching for one 
 Return ONLY a JSON array of strings.`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
   });
 
   const text = response.content[0].text.trim();
-  return JSON.parse(text);
+  return parseJsonResponse(text);
 }
 

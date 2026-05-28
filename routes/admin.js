@@ -6,8 +6,11 @@ import { getDb } from '../db/index.js';
 import { runPrecompute } from '../services/precompute.js';
 import { refreshExpiringCache, getDailyApiUsage } from '../services/amazon.js';
 import { syncAll, loadAngles, loadBudgetBuckets, loadOccasions } from '../services/taxonomy.js';
+import { createUserSchema, addHobbiesSchema, validate } from './schemas.js';
 
 export default async function adminRoutes(fastify) {
+  fastify.addHook('onRequest', fastify.adminAuth);
+
   // POST /admin/taxonomy/sync — Sync taxonomy .txt files into Supabase
   fastify.post('/admin/taxonomy/sync', async (request, reply) => {
     try {
@@ -49,15 +52,17 @@ export default async function adminRoutes(fastify) {
   fastify.get('/admin/api-usage', async () => getDailyApiUsage());
 
   // GET /admin/hobbies — List all hobbies
-  fastify.get('/admin/hobbies', async () => {
+  fastify.get('/admin/hobbies', async (request) => {
     const sb = getDb();
-    const { data } = await sb.from('hobbies').select('*').order('name');
-    return data ?? [];
+    const limit = Math.min(parseInt(request.query.limit) || 50, 200);
+    const offset = parseInt(request.query.offset) || 0;
+    const { data, count } = await sb.from('hobbies').select('*', { count: 'exact' }).order('name').range(offset, offset + limit - 1);
+    return { data: data ?? [], total: count ?? 0, limit, offset };
   });
 
   // POST /admin/hobbies — Add hobbies (bulk)
   fastify.post('/admin/hobbies', async (request, reply) => {
-    const { hobbies } = request.body;
+    const { hobbies } = validate(addHobbiesSchema, request.body);
     const sb = getDb();
     const inserted = [];
 
@@ -75,7 +80,7 @@ export default async function adminRoutes(fastify) {
 
   // POST /admin/users — Create user
   fastify.post('/admin/users', async (request, reply) => {
-    const { name, email } = request.body;
+    const { name, email } = validate(createUserSchema, request.body);
     const sb = getDb();
     const { data, error } = await sb.from('users').insert({ name, email }).select().single();
     if (error) return reply.code(400).send({ error: error.message });
@@ -83,24 +88,30 @@ export default async function adminRoutes(fastify) {
   });
 
   // GET /admin/users — List users
-  fastify.get('/admin/users', async () => {
+  fastify.get('/admin/users', async (request) => {
     const sb = getDb();
-    const { data } = await sb.from('users').select('*').order('name');
-    return data ?? [];
+    const limit = Math.min(parseInt(request.query.limit) || 50, 200);
+    const offset = parseInt(request.query.offset) || 0;
+    const { data, count } = await sb.from('users').select('*', { count: 'exact' }).order('name').range(offset, offset + limit - 1);
+    return { data: data ?? [], total: count ?? 0, limit, offset };
   });
 
   // GET /admin/profiles — List all profiles
-  fastify.get('/admin/profiles', async () => {
+  fastify.get('/admin/profiles', async (request) => {
     const sb = getDb();
-    const { data } = await sb.from('profiles').select('*').order('created_at', { ascending: false });
-    return data ?? [];
+    const limit = Math.min(parseInt(request.query.limit) || 50, 200);
+    const offset = parseInt(request.query.offset) || 0;
+    const { data, count } = await sb.from('profiles').select('*', { count: 'exact' }).order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+    return { data: data ?? [], total: count ?? 0, limit, offset };
   });
 
   // GET /admin/sessions — List active sessions
-  fastify.get('/admin/sessions', async () => {
+  fastify.get('/admin/sessions', async (request) => {
     const sb = getDb();
-    const { data } = await sb.from('sessions').select('*').is('ended_at', null).order('started_at', { ascending: false });
-    return data ?? [];
+    const limit = Math.min(parseInt(request.query.limit) || 50, 200);
+    const offset = parseInt(request.query.offset) || 0;
+    const { data, count } = await sb.from('sessions').select('*', { count: 'exact' }).is('ended_at', null).order('started_at', { ascending: false }).range(offset, offset + limit - 1);
+    return { data: data ?? [], total: count ?? 0, limit, offset };
   });
 
   // GET /admin/stats — Get system stats

@@ -52,21 +52,50 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
     if (s.suppression_type === 'cluster') suppressedClusters.add(`${s.hobby_id}:${s.angle}`);
   }
 
-  // 5. Load recently served ASINs (last 500)
+  // 5. Load recent feed events for recycling rules (§12) and recency scoring (§7.3)
   const { data: recentEvents } = await sb
     .from('feed_events')
-    .select('item_asin, signal')
+    .select('item_asin, signal, served_at')
     .eq('profile_id', profileId)
     .order('served_at', { ascending: false })
     .limit(500);
-  const recentlyServed = new Set((recentEvents ?? []).map(r => r.item_asin));
+
+  // Build exclusion set per §12 recycling rules:
+  //   - save/shop_now: permanently excluded (user acted)
+  //   - dislike: permanently excluded (handled by dislike_suppressions, but also here)
+  //   - skip: excluded for 30 days
+  //   - null (just served, no action yet): excluded (still in current feed)
+  const now = Date.now();
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  const recentlyServed = new Set();
+  const asinLastSeen = {};
+
+  for (const e of (recentEvents ?? [])) {
+    // Recency map for scoring
+    if (!asinLastSeen[e.item_asin]) {
+      asinLastSeen[e.item_asin] = (now - new Date(e.served_at).getTime()) / (1000 * 60 * 60 * 24);
+    }
+
+    // Recycling exclusion
+    if (e.signal === 'save' || e.signal === 'shop_now' || e.signal === 'dislike') {
+      recentlyServed.add(e.item_asin); // permanent
+    } else if (e.signal === 'skip') {
+      if (now - new Date(e.served_at).getTime() < THIRTY_DAYS_MS) {
+        recentlyServed.add(e.item_asin); // 30-day window
+      }
+    } else {
+      // null signal — currently in feed, not yet acted on
+      recentlyServed.add(e.item_asin);
+    }
+  }
 
   // 6. Resolve budget buckets
   const budgetBuckets = resolveBudgetBuckets(profile.budget_min, profile.budget_max);
 
-  // 7. Build item pool
+  // 7. Build item pool — collect all lookups, then fetch in parallel
   const itemPool = [];
   const hobbyIds = profile.hobby_ids ?? [];
+  const fetchQueue = []; // { term, bucket, meta }
 
   // Fetch hobby names
   let hobbyNames = [];
@@ -76,7 +105,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
     hobbyNames = hobbyRows ?? [];
   }
 
-  // Hobby × Angle items
+  // Hobby × Angle — gather search terms from DB
   for (const hobbyId of hobbyIds) {
     for (const angle of ALL_ANGLES) {
       const { data: exp } = await sb
@@ -87,19 +116,13 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
         .maybeSingle();
       if (!exp) continue;
 
+      const termsToUse = exp.search_terms.slice(0, 3);
       for (const bucket of budgetBuckets) {
-        const termsToUse = exp.search_terms.slice(0, 3);
         for (const term of termsToUse) {
-          const items = await getItemsForSearchTerm(term, bucket);
-          for (const item of items) {
-            itemPool.push({
-              ...item,
-              hobby_id: hobbyId,
-              angle,
-              slot_type: angle === 'wildcard' ? 'wildcard' : 'interest',
-              source_term: term,
-            });
-          }
+          fetchQueue.push({
+            term, bucket,
+            meta: { hobby_id: hobbyId, angle, slot_type: angle === 'wildcard' ? 'wildcard' : 'interest' },
+          });
         }
       }
     }
@@ -133,15 +156,15 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
 
     for (const bucket of budgetBuckets) {
       for (const term of (crossTerms ?? []).slice(0, 3)) {
-        const items = await getItemsForSearchTerm(term, bucket);
-        for (const item of items) {
-          itemPool.push({ ...item, hobby_id: null, angle: null, slot_type: 'adjacent', source_term: term });
-        }
+        fetchQueue.push({
+          term, bucket,
+          meta: { hobby_id: null, angle: null, slot_type: 'adjacent' },
+        });
       }
     }
   }
 
-  // Occasion items
+  // Occasion items — gather terms from DB
   for (const bucket of budgetBuckets) {
     const { data: occRow } = await sb
       .from('occasion_search_terms')
@@ -152,12 +175,24 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
 
     if (occRow) {
       for (const term of occRow.search_terms.slice(0, 3)) {
-        const items = await getItemsForSearchTerm(term, bucket);
-        for (const item of items) {
-          itemPool.push({ ...item, hobby_id: null, angle: null, slot_type: 'occasion', source_term: term });
-        }
+        fetchQueue.push({
+          term, bucket,
+          meta: { hobby_id: null, angle: null, slot_type: 'occasion' },
+        });
       }
     }
+  }
+
+  // Fetch all items in parallel — cache hits resolve instantly,
+  // cache misses go through the Amazon throttle sequentially
+  const fetchResults = await Promise.all(
+    fetchQueue.map(async ({ term, bucket, meta }) => {
+      const items = await getItemsForSearchTerm(term, bucket);
+      return items.map(item => ({ ...item, ...meta, source_term: term }));
+    })
+  );
+  for (const items of fetchResults) {
+    itemPool.push(...items);
   }
 
   // 8. Filter item pool
@@ -168,12 +203,9 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
     if (recentlyServed.has(item.asin)) return false;
     if (suppressedAsins.has(item.asin)) return false;
     if (item.hobby_id && item.angle && suppressedClusters.has(`${item.hobby_id}:${item.angle}`)) return false;
-    if (item.price < profile.budget_min || item.price > profile.budget_max) return false;
+    if (item.price > 0 && (item.price < profile.budget_min || item.price > profile.budget_max)) return false;
     return true;
   });
-
-  // 9. Score items
-  const scored = filtered.map(item => ({ ...item, score: scoreItem(item, weights) }));
 
   // 10. Fill slots from pattern
   const feed = [];
@@ -183,14 +215,19 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
   for (let i = 0; i < batchSize; i++) {
     const slotType = SLOT_PATTERN[i % SLOT_PATTERN.length];
 
-    let candidates = scored.filter(item => {
-      if (usedAsins.has(item.asin)) return false;
-      return item.slot_type === slotType;
-    });
+    // Re-score each iteration so diversity bonus reflects picks so far
+    let candidates = filtered
+      .filter(item => {
+        if (usedAsins.has(item.asin)) return false;
+        return item.slot_type === slotType;
+      })
+      .map(item => ({ ...item, score: scoreItem(item, weights, asinLastSeen, lastClusters) }));
 
     // Fall back to any available if no candidates for this slot
     if (candidates.length === 0) {
-      candidates = scored.filter(item => !usedAsins.has(item.asin));
+      candidates = filtered
+        .filter(item => !usedAsins.has(item.asin))
+        .map(item => ({ ...item, score: scoreItem(item, weights, asinLastSeen, lastClusters) }));
     }
     if (candidates.length === 0) break;
 
@@ -252,16 +289,26 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
 
 /**
  * Score an item (§7.3).
+ * score = baseWeight * cooldownMultiplier * recencyBonus * diversityBonus + noise
  */
-function scoreItem(item, weights) {
+function scoreItem(item, weights, asinLastSeen, recentClusters) {
   const clusterKey = item.hobby_id && item.angle ? `${item.hobby_id}:${item.angle}` : null;
   const w = clusterKey ? weights[clusterKey] : null;
   const baseWeight = w?.weight ?? 1.0;
 
+  // Cooldown: heavily deprioritize clusters in shop_now cooldown
   let cooldownMultiplier = 1.0;
   if (w?.cooldown_until && new Date(w.cooldown_until) > new Date()) {
     cooldownMultiplier = 0.2;
   }
 
-  return baseWeight * cooldownMultiplier + (Math.random() * 0.1);
+  // Recency bonus: items not seen in a long time get a boost (§7.3)
+  const daysSinceSeen = asinLastSeen[item.asin] ?? 30;
+  const recencyBonus = Math.min(daysSinceSeen / 30, 1.5);
+
+  // Diversity bonus: boost items from a different cluster than recent picks (§7.3)
+  const last2 = recentClusters.slice(-2);
+  const diversityBonus = (clusterKey && last2.includes(clusterKey)) ? 0.5 : 1.2;
+
+  return baseWeight * cooldownMultiplier * recencyBonus * diversityBonus + (Math.random() * 0.1);
 }
