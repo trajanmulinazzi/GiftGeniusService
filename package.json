@@ -16,7 +16,7 @@
     "db:migrate:docker": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
   "dependencies": {
-    "@amzn/creatorsapi-nodejs-sdk": "file:../creatorsapi-nodejs-sdk",
+    "amazon-creators-api": "^1.2.2",
     "@anthropic-ai/sdk": "^0.95.0",
     "@clack/prompts": "^1.0.0",
     "@fastify/cors": "^11.2.0",

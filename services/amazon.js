@@ -9,7 +9,7 @@ import { getDb } from '../db/index.js';
 import { loadAngles, loadBudgetBuckets, getBucketRanges } from './taxonomy.js';
 
 const require = createRequire(import.meta.url);
-const { ApiClient, DefaultApi, SearchItemsRequestContent } = require('@amzn/creatorsapi-nodejs-sdk');
+const { ApiClient, DefaultApi, SearchItemsRequestContent } = require('amazon-creators-api');
 
 // ── Taxonomy-driven constants (read from .txt files) ──────
 const ALL_ANGLES = loadAngles().map(a => a.name);
