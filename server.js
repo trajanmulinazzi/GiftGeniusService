@@ -11,7 +11,7 @@ import fastifyCors from '@fastify/cors';
 import fastifyJwt from '@fastify/jwt';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 
 import { startJobs } from './services/jobs.js';
 import authRoutes from './routes/auth.js';
@@ -90,10 +90,28 @@ fastify.setErrorHandler((error, request, reply) => {
   });
 });
 
-// Serve index.html manually (no @fastify/static dependency needed)
+// Serve built test console from public/
+const ASSET_TYPES = {
+  '.css': 'text/css',
+  '.js': 'application/javascript',
+};
+
 fastify.get('/', async (request, reply) => {
   const html = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
   reply.type('text/html').send(html);
+});
+
+fastify.get('/assets/:file', async (request, reply) => {
+  const { file } = request.params;
+  if (file.includes('..') || file.includes('/')) {
+    return reply.code(400).send({ error: 'Bad Request' });
+  }
+  const path = join(__dirname, 'public', 'assets', file);
+  if (!existsSync(path)) {
+    return reply.code(404).send({ error: 'Not found' });
+  }
+  const ext = file.slice(file.lastIndexOf('.'));
+  reply.type(ASSET_TYPES[ext] || 'application/octet-stream').send(readFileSync(path));
 });
 
 // Routes
