@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api } from './api.js';
+import { api, getAdminSecret, setAdminSecret } from './api.js';
 import SetupPanel from './panels/SetupPanel.jsx';
 import PrecomputePanel from './panels/PrecomputePanel.jsx';
 import ProfilePanel from './panels/ProfilePanel.jsx';
@@ -17,6 +17,7 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState(null);
   const [activeStep, setActiveStep] = useState(0);
+  const [adminSecret, setAdminSecretState] = useState(() => getAdminSecret() || '');
 
   const showToast = useCallback((msg, type = 'success') => {
     setToast({ msg, type });
@@ -40,7 +41,11 @@ export default function App() {
       setProfiles(p.data ?? p);
       setSessions(sess.data ?? sess);
     } catch (err) {
-      showToast('Server not reachable', 'error');
+      if (err.status === 403) {
+        showToast('Admin secret required or invalid — set it in the header', 'error');
+      } else {
+        showToast(err.message || err.error || 'Server not reachable', 'error');
+      }
     }
   }, [showToast]);
 
@@ -66,7 +71,22 @@ export default function App() {
             </div>
           </div>
         </div>
-        <StatsBar stats={stats} />
+        <div className="header-right">
+          <label className="admin-secret-field">
+            <span>Admin secret</span>
+            <input
+              type="password"
+              value={adminSecret}
+              placeholder="ADMIN_SECRET from Render"
+              onChange={e => {
+                setAdminSecretState(e.target.value);
+                setAdminSecret(e.target.value);
+              }}
+              onBlur={() => refresh()}
+            />
+          </label>
+          <StatsBar stats={stats} />
+        </div>
       </header>
 
       <nav className="step-nav">

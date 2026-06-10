@@ -22,6 +22,16 @@ body {
 }
 
 .header-left { display: flex; align-items: center; gap: 12px; }
+.header-right { display: flex; align-items: center; gap: 16px; }
+.admin-secret-field {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 0.7rem; color: #888;
+}
+.admin-secret-field input {
+  width: 200px; padding: 6px 10px;
+  background: #1a1a1e; border: 1px solid #2a2a30;
+  border-radius: 6px; color: #eee; font-size: 0.8rem;
+}
 
 .logo { display: flex; align-items: center; gap: 12px; }
 .logo-icon {
