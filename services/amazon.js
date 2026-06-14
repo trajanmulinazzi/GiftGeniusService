@@ -145,6 +145,42 @@ function extractPrice(item) {
   return listing?.price?.money?.amount ?? listing?.price?.amount ?? 0;
 }
 
+function cacheItemsNeedRefresh(items) {
+  if (!items?.length) return true;
+  return items.every(i => !i.price || i.price <= 0);
+}
+
+function cacheExpiresAt() {
+  return new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString();
+}
+
+/** Upsert or update a cache row in place — never bulk-delete. */
+async function writeCacheEntry(sb, { cache_key, search_term, budget_bucket, items }) {
+  const now = new Date().toISOString();
+  await sb.from('amazon_cache').upsert({
+    cache_key,
+    search_term,
+    budget_bucket,
+    items,
+    cached_at: now,
+    expires_at: cacheExpiresAt(),
+    hit_count: 0,
+  }, { onConflict: 'cache_key' });
+}
+
+async function refreshCacheRow(sb, row) {
+  const [minPrice, maxPrice] = BUCKET_RANGES[row.budget_bucket] ?? [0, 9999];
+  const items = await callAmazonAPI(row.search_term, minPrice, maxPrice);
+  await sb.from('amazon_cache').update({
+    items,
+    expires_at: cacheExpiresAt(),
+    cached_at: new Date().toISOString(),
+    hit_count: 0,
+  }).eq('cache_key', row.cache_key);
+  await incrementDailyCallCount();
+  return true;
+}
+
 // ── Cache Resolution Flow (§6.3) ──────────────────────────
 export async function getItemsForSearchTerm(searchTerm, bucket) {
   const sb = getDb();
@@ -160,15 +196,14 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
 
   if (cached) {
     const items = cached.items ?? [];
-    const allPricesMissing = items.length > 0 && items.every(i => !i.price || i.price <= 0);
-    if (!allPricesMissing) {
+    if (!cacheItemsNeedRefresh(items)) {
       sb.rpc('increment_cache_hit', { p_cache_key: key }); // fire and forget
       return items.map(item => ({
         ...item,
         image_url: normalizeAmazonImageUrl(item.image_url),
       }));
     }
-    // Stale cache (e.g. pre–price-fix entries) — fall through to refetch
+    // Stale entry — refetch and update row in place (no delete)
   }
 
   // Check daily limit
@@ -182,18 +217,7 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
   const [minPrice, maxPrice] = BUCKET_RANGES[bucket] ?? [0, 9999];
   try {
     const items = await callAmazonAPI(searchTerm, minPrice, maxPrice);
-    const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString();
-
-    await sb.from('amazon_cache').upsert({
-      cache_key: key,
-      search_term: searchTerm,
-      budget_bucket: bucket,
-      items,
-      cached_at: new Date().toISOString(),
-      expires_at: expiresAt,
-      hit_count: 0,
-    }, { onConflict: 'cache_key' });
-
+    await writeCacheEntry(sb, { cache_key: key, search_term: searchTerm, budget_bucket: bucket, items });
     await incrementDailyCallCount();
     return items;
   } catch (err) {
@@ -203,41 +227,52 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
 }
 
 // ── Cache Refresh Job (§6.5) ──────────────────────────────
-export async function refreshExpiringCache() {
+/** Refresh cache rows in place: expiring soon + stale item data (e.g. missing prices). */
+export async function refreshExpiringCache({ limit = 100 } = {}) {
   const sb = getDb();
   const sixHoursFromNow = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+  const candidates = new Map();
 
   const { data: expiring } = await sb
     .from('amazon_cache')
-    .select('cache_key, search_term, budget_bucket')
+    .select('cache_key, search_term, budget_bucket, items')
     .lt('expires_at', sixHoursFromNow)
     .order('hit_count', { ascending: false })
-    .limit(100);
+    .limit(limit);
+
+  for (const row of (expiring ?? [])) {
+    candidates.set(row.cache_key, row);
+  }
+
+  if (candidates.size < limit) {
+    const { data: rows } = await sb
+      .from('amazon_cache')
+      .select('cache_key, search_term, budget_bucket, items')
+      .order('cached_at', { ascending: true })
+      .limit(500);
+
+    for (const row of (rows ?? [])) {
+      if (candidates.size >= limit) break;
+      if (cacheItemsNeedRefresh(row.items)) {
+        candidates.set(row.cache_key, row);
+      }
+    }
+  }
 
   let refreshed = 0;
-  for (const row of (expiring ?? [])) {
+  for (const row of candidates.values()) {
     const dailyCount = await getDailyCallCount();
     if (dailyCount >= DAILY_CALL_LIMIT) break;
 
-    const [minPrice, maxPrice] = BUCKET_RANGES[row.budget_bucket] ?? [0, 9999];
     try {
-      const items = await callAmazonAPI(row.search_term, minPrice, maxPrice);
-      const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString();
-      await sb.from('amazon_cache').update({
-        items,
-        expires_at: expiresAt,
-        cached_at: new Date().toISOString(),
-        hit_count: 0,
-      }).eq('cache_key', row.cache_key);
-
-      await incrementDailyCallCount();
+      await refreshCacheRow(sb, row);
       refreshed++;
     } catch (err) {
       console.error(`[Amazon] Refresh error for "${row.search_term}":`, err.message ?? err);
     }
   }
 
-  console.log(`[Amazon] Cache refresh: ${refreshed}/${(expiring ?? []).length} entries`);
+  console.log(`[Amazon] Cache refresh: ${refreshed}/${candidates.size} entries updated in place`);
   return refreshed;
 }
 
