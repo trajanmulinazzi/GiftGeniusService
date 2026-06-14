@@ -24,12 +24,23 @@ const MIN_REQUEST_INTERVAL_MS = 1200; // slightly over 1 TPS to stay safely unde
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000; // exponential backoff: 2s, 4s, 8s
 
+const IMAGE_LONGEST_EDGE_PX = 500;
+
 const SEARCH_RESOURCES = [
-  'images.primary.medium',
+  'images.primary.large',
   'itemInfo.title',
   'itemInfo.classifications',
   'offersV2.listings.price',
 ];
+
+/** Upscale Amazon CDN thumbnails (e.g. _SL160_) for sharper swipe cards. */
+export function normalizeAmazonImageUrl(url) {
+  if (!url) return url;
+  return url.replace(/\._SL(\d+)_\./, (match, size) => {
+    const px = parseInt(size, 10);
+    return px >= IMAGE_LONGEST_EDGE_PX ? match : `._SL${IMAGE_LONGEST_EDGE_PX}_.`;
+  });
+}
 
 // ── API Client Singleton ──────────────────────────────────
 let _api = null;
@@ -108,7 +119,7 @@ async function callAmazonAPI(searchTerm, minPrice, maxPrice) {
         asin: item.asin,
         title: item.itemInfo?.title?.displayValue ?? '',
         price: extractPrice(item),
-        image_url: item.images?.primary?.medium?.url ?? '',
+        image_url: normalizeAmazonImageUrl(item.images?.primary?.large?.url ?? ''),
         product_url: item.detailPageURL ?? `https://www.amazon.com/dp/${item.asin}?tag=${process.env.AMAZON_PARTNER_TAG}`,
         category: item.itemInfo?.classifications?.binding?.displayValue ?? 'General',
         fetched_at: new Date().toISOString(),
@@ -147,7 +158,10 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
 
   if (cached) {
     sb.rpc('increment_cache_hit', { p_cache_key: key }); // fire and forget
-    return cached.items;
+    return cached.items.map(item => ({
+      ...item,
+      image_url: normalizeAmazonImageUrl(item.image_url),
+    }));
   }
 
   // Check daily limit
