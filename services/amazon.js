@@ -140,7 +140,9 @@ async function callAmazonAPI(searchTerm, minPrice, maxPrice) {
 function extractPrice(item) {
   const listings = item.offersV2?.listings;
   if (!listings || listings.length === 0) return 0;
-  return listings[0]?.price?.amount ?? 0;
+  const listing = listings.find(l => l.isBuyBoxWinner) ?? listings[0];
+  // Creators API nests amount under price.money (not price.amount)
+  return listing?.price?.money?.amount ?? listing?.price?.amount ?? 0;
 }
 
 // ── Cache Resolution Flow (§6.3) ──────────────────────────
