@@ -159,11 +159,16 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
     .maybeSingle();
 
   if (cached) {
-    sb.rpc('increment_cache_hit', { p_cache_key: key }); // fire and forget
-    return cached.items.map(item => ({
-      ...item,
-      image_url: normalizeAmazonImageUrl(item.image_url),
-    }));
+    const items = cached.items ?? [];
+    const allPricesMissing = items.length > 0 && items.every(i => !i.price || i.price <= 0);
+    if (!allPricesMissing) {
+      sb.rpc('increment_cache_hit', { p_cache_key: key }); // fire and forget
+      return items.map(item => ({
+        ...item,
+        image_url: normalizeAmazonImageUrl(item.image_url),
+      }));
+    }
+    // Stale cache (e.g. pre–price-fix entries) — fall through to refetch
   }
 
   // Check daily limit
