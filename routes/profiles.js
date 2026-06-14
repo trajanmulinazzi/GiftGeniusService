@@ -3,6 +3,7 @@
  */
 
 import { getDb } from '../db/index.js';
+import { normalizeAmazonImageUrl } from '../services/amazon.js';
 import { loadAngles } from '../services/taxonomy.js';
 import { createProfileSchema, updateProfileSchema, validate } from './schemas.js';
 
@@ -54,6 +55,47 @@ export default async function profileRoutes(fastify) {
       .order('created_at', { ascending: false });
     if (error) return reply.code(500).send({ error: error.message });
     return { data: data ?? [] };
+  });
+
+  // GET /profiles/:id/saved — Saved gift items for a profile
+  fastify.get('/profiles/:id/saved', async (request, reply) => {
+    const sb = getDb();
+    const { id } = request.params;
+
+    const { data: profile } = await sb.from('profiles').select('user_id').eq('id', id).single();
+    if (!profile) return reply.code(404).send({ error: 'Profile not found' });
+    if (profile.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+
+    const limit = Math.min(parseInt(request.query.limit) || 50, 200);
+    const offset = parseInt(request.query.offset) || 0;
+
+    const { data, error, count } = await sb
+      .from('feed_events')
+      .select('id, item_asin, item_snapshot, hobby_id, angle, slot_type, acted_at', { count: 'exact' })
+      .eq('profile_id', id)
+      .eq('signal', 'save')
+      .order('acted_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) return reply.code(500).send({ error: error.message });
+
+    const items = (data ?? []).map(row => {
+      const snap = row.item_snapshot ?? {};
+      return {
+        feed_event_id: row.id,
+        asin: row.item_asin,
+        title: snap.title ?? '',
+        price: snap.price ?? 0,
+        image_url: normalizeAmazonImageUrl(snap.image_url ?? ''),
+        product_url: snap.product_url ?? '',
+        slot_type: row.slot_type,
+        hobby_id: row.hobby_id,
+        angle: row.angle,
+        saved_at: row.acted_at,
+      };
+    });
+
+    return { items, count: items.length, total: count ?? 0, limit, offset };
   });
 
   // GET /profiles/:id — Get profile with current weights summary
