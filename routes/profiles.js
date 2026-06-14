@@ -43,6 +43,19 @@ export default async function profileRoutes(fastify) {
     return reply.code(201).send(profile);
   });
 
+  // GET /profiles — List profiles for the authenticated user
+  fastify.get('/profiles', async (request, reply) => {
+    const sb = getDb();
+    const user_id = request.user.id;
+    const { data, error } = await sb
+      .from('profiles')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('created_at', { ascending: false });
+    if (error) return reply.code(500).send({ error: error.message });
+    return { data: data ?? [] };
+  });
+
   // GET /profiles/:id — Get profile with current weights summary
   fastify.get('/profiles/:id', async (request, reply) => {
     const sb = getDb();

@@ -16,6 +16,7 @@ import { readFileSync, existsSync } from 'fs';
 import { startJobs } from './services/jobs.js';
 import authRoutes from './routes/auth.js';
 import profileRoutes from './routes/profiles.js';
+import hobbyRoutes from './routes/hobbies.js';
 import sessionRoutes from './routes/sessions.js';
 import feedRoutes from './routes/feed.js';
 import adminRoutes from './routes/admin.js';
@@ -116,6 +117,7 @@ fastify.get('/assets/:file', async (request, reply) => {
 
 // Routes
 await fastify.register(authRoutes);
+await fastify.register(hobbyRoutes);
 await fastify.register(profileRoutes);
 await fastify.register(sessionRoutes);
 await fastify.register(feedRoutes);
