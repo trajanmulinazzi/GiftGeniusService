@@ -4,6 +4,7 @@
 
 import { getDb } from '../db/index.js';
 import { createSessionSchema, validate } from './schemas.js';
+import { prefetchFeedCache } from '../services/feed.js';
 
 export default async function sessionRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate);
@@ -25,6 +26,7 @@ export default async function sessionRoutes(fastify) {
       .single();
 
     if (error) return reply.code(400).send({ error: error.message });
+    prefetchFeedCache(profile_id, occasion);
     return reply.code(201).send(data);
   });
 
