@@ -32,7 +32,7 @@ User → Profile → Session → generateFeed() → amazon_cache → feed_events
 | Runtime | Node.js (ES modules) |
 | HTTP | Fastify 5 |
 | Validation | Zod (`routes/schemas.js`) |
-| Auth | `@fastify/jwt` (Bearer tokens) |
+| Auth | Clerk session JWT verified via JWKS (`jose`); mapped to a backend user |
 | Database | Supabase (PostgreSQL) via `@supabase/supabase-js` |
 | Amazon | Amazon Creators API (`amazon-creators-api` npm package) |
 | LLM | Anthropic Claude (`@anthropic-ai/sdk`) — setup/precompute only |
@@ -260,7 +260,15 @@ POST /feed/signal { feed_event_id, signal }
 
 ## 7. API Surface
 
-All authenticated routes expect `Authorization: Bearer <jwt>`. Admin routes additionally accept `x-admin-secret` when `ADMIN_SECRET` is set.
+All authenticated routes expect `Authorization: Bearer <clerk_session_jwt>`. The
+token is verified against Clerk's JWKS and mapped to a backend user (created on
+first sign-in, keyed by `users.clerk_user_id`). `request.user.id` is always the
+backend UUID. Admin routes additionally accept `x-admin-secret` when
+`ADMIN_SECRET` is set.
+
+> **Local testing:** set `ALLOW_DEV_AUTH=true` and send `x-dev-user-id: <uuid>`
+> to bypass Clerk and act as that backend user. Off by default — never enable in
+> production.
 
 ### Public
 
@@ -273,7 +281,8 @@ All authenticated routes expect `Authorization: Bearer <jwt>`. Admin routes addi
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/auth/token` | Issue JWT for `{ user_id }` (dev/test convenience) |
+| `POST` | `/auth/sync` | Verify Clerk token, get-or-create backend user, enrich name/email |
+| `GET` | `/auth/me` | Return the authenticated backend user |
 
 ### Profiles (authenticated)
 
@@ -353,11 +362,11 @@ Started automatically when the API server boots (`services/jobs.js`):
 
 | Concern | Implementation |
 |---|---|
-| User identity | JWT (`@fastify/jwt`), `request.user.id` from token payload |
+| User identity | Clerk session JWT verified via JWKS (`services/clerk-auth.js`); mapped to a backend user. `request.user.id` is the backend UUID |
 | Resource ownership | Routes verify `profile.user_id === request.user.id` via joins |
 | Admin access | `x-admin-secret` header; skipped if `ADMIN_SECRET` unset (dev only) |
 | Input validation | Zod schemas in `routes/schemas.js` |
-| Error responses | Unified handler in `server.js`; 500s hide details in production |
+| Error responses | Unified `{ error: { code, message } }` handler in `server.js`; 500s hide details in production |
 | Secrets | Env vars only — never committed |
 
 For a full security checklist, see [`docs/personas/security.md`](./docs/personas/security.md).
@@ -370,8 +379,10 @@ For a full security checklist, see [`docs/personas/security.md`](./docs/personas
 |---|---|---|
 | `SUPABASE_URL` | Yes | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side DB access |
-| `SUPABASE_ACCESS_TOKEN` | Migrate only | Personal token for `scripts/migrate.js` |
-| `JWT_SECRET` | Prod | JWT signing secret |
+| `SUPABASE_ACCESS_TOKEN` | Migrate only | Personal token for `scripts/migrate.js` / `scripts/apply-sql.js` |
+| `CLERK_PUBLISHABLE_KEY` | Yes | Clerk key; the JWKS/issuer are derived from it to verify session tokens |
+| `CLERK_ISSUER` / `CLERK_JWKS_URL` | Optional | Override issuer/JWKS instead of deriving from the publishable key |
+| `ALLOW_DEV_AUTH` | Dev only | When `true`, `x-dev-user-id` bypasses Clerk (local testing) |
 | `ADMIN_SECRET` | Prod | Protects `/admin/*` routes |
 | `AMAZON_CREDENTIAL_ID` | Yes | Creators API credential |
 | `AMAZON_CREDENTIAL_SECRET` | Yes | Creators API secret |
@@ -434,11 +445,12 @@ The console walks through: Setup → Pre-Compute → Profile → Session → Fee
 
 The mobile/Expo client should follow this sequence:
 
-1. Obtain JWT via `POST /auth/token` (or future real auth)
-2. `POST /profiles` with `hobby_ids` (UUIDs from `GET /admin/hobbies`)
-3. `POST /sessions` with `profile_id` + `occasion`
-4. `GET /feed/:session_id?batch=N` — render swipe cards
-5. `POST /feed/signal` with `feed_event_id` on each swipe action
+1. Sign in with Clerk; send the Clerk session JWT as `Authorization: Bearer`
+2. `POST /auth/sync` once to ensure/enrich the backend user
+3. `POST /profiles` with `hobby_ids` (UUIDs from `GET /hobbies`) + optional `occasion`
+4. `POST /sessions` with `profile_id` (omit `occasion` to use the profile's saved one)
+5. `GET /feed/:session_id?batch=N` — render swipe cards
+6. `POST /feed/signal` with `feed_event_id` on each swipe action
 
 Map UI actions to signals:
 
@@ -449,7 +461,8 @@ Map UI actions to signals:
 | Open buy link | `shop_now` |
 | Strong reject | `dislike` |
 
-Saved items are `feed_events` where `signal = 'save'`. A dedicated `GET /saved` endpoint is not yet implemented — query via admin or add a profile-scoped route when needed.
+Saved items are `feed_events` where `signal = 'save'`, served by
+`GET /profiles/:id/saved` (paginated).
 
 For detailed client examples, update [`FRONTEND_INTEGRATION_GUIDE.md`](./FRONTEND_INTEGRATION_GUIDE.md) to match this API (it currently describes the legacy feeds model).
 

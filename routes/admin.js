@@ -7,6 +7,7 @@ import { runPrecompute } from '../services/precompute.js';
 import { refreshExpiringCache, getDailyApiUsage } from '../services/amazon.js';
 import { syncAll, loadAngles, loadBudgetBuckets, loadOccasions } from '../services/taxonomy.js';
 import { createUserSchema, addHobbiesSchema, validate } from './schemas.js';
+import { sendError } from './errors.js';
 
 export default async function adminRoutes(fastify) {
   fastify.addHook('onRequest', fastify.adminAuth);
@@ -17,7 +18,7 @@ export default async function adminRoutes(fastify) {
       return await syncAll();
     } catch (err) {
       console.error('[Admin] Taxonomy sync error:', err);
-      return reply.code(500).send({ error: err.message });
+      return sendError(reply, 500, err.message);
     }
   });
 
@@ -34,7 +35,7 @@ export default async function adminRoutes(fastify) {
       return await runPrecompute();
     } catch (err) {
       console.error('[Admin] Precompute error:', err);
-      return reply.code(500).send({ error: err.message });
+      return sendError(reply, 500, err.message);
     }
   });
 
@@ -44,7 +45,7 @@ export default async function adminRoutes(fastify) {
       return { refreshed: await refreshExpiringCache() };
     } catch (err) {
       console.error('[Admin] Cache refresh error:', err);
-      return reply.code(500).send({ error: err.message });
+      return sendError(reply, 500, err.message);
     }
   });
 
@@ -83,7 +84,7 @@ export default async function adminRoutes(fastify) {
     const { name, email } = validate(createUserSchema, request.body);
     const sb = getDb();
     const { data, error } = await sb.from('users').insert({ name, email }).select().single();
-    if (error) return reply.code(400).send({ error: error.message });
+    if (error) return sendError(reply, 400, error.message);
     return reply.code(201).send(data);
   });
 

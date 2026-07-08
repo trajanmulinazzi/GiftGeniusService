@@ -6,12 +6,16 @@ import { z } from 'zod';
 
 const uuid = z.string().uuid();
 
+// ── Occasions (shared) ───────────────────────────────────
+const OCCASIONS = ['birthday', 'christmas', 'mothers_day', 'fathers_day', 'anniversary', 'graduation', 'housewarming', 'just_because'];
+
 // ── Profiles ─────────────────────────────────────────────
 export const createProfileSchema = z.object({
   label: z.string().min(1).max(100),
   hobby_ids: z.array(uuid).min(1).max(20),
   budget_min: z.number().int().min(0),
   budget_max: z.number().int().min(1),
+  occasion: z.enum(OCCASIONS).optional(),
 }).refine(d => d.budget_max > d.budget_min, {
   message: 'budget_max must be greater than budget_min',
 });
@@ -21,6 +25,7 @@ export const updateProfileSchema = z.object({
   hobby_ids: z.array(uuid).min(1).max(20).optional(),
   budget_min: z.number().int().min(0).optional(),
   budget_max: z.number().int().min(1).optional(),
+  occasion: z.enum(OCCASIONS).optional(),
 }).refine(d => {
   if (d.budget_min !== undefined && d.budget_max !== undefined) {
     return d.budget_max > d.budget_min;
@@ -29,11 +34,10 @@ export const updateProfileSchema = z.object({
 }, { message: 'budget_max must be greater than budget_min' });
 
 // ── Sessions ─────────────────────────────────────────────
-const OCCASIONS = ['birthday', 'christmas', 'mothers_day', 'fathers_day', 'anniversary', 'graduation', 'housewarming', 'just_because'];
-
 export const createSessionSchema = z.object({
   profile_id: uuid,
-  occasion: z.enum(OCCASIONS),
+  // Optional: falls back to the profile's saved occasion when omitted.
+  occasion: z.enum(OCCASIONS).optional(),
 });
 
 // ── Feed ─────────────────────────────────────────────────

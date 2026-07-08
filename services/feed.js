@@ -21,6 +21,24 @@ const FETCH_CHUNK_SIZE = 6;
 const MAX_FETCH_ROUNDS = 20;
 
 /**
+ * Round-robin merge per-hobby term lists so no single hobby dominates the fetch
+ * order. Without this the interest queue is grouped by hobby and the
+ * incremental fetcher drains the first hobby before reaching the others —
+ * skewing a multi-hobby feed entirely to one interest.
+ */
+function interleaveByHobby(byHobby) {
+  const lists = [...byHobby.values()];
+  const merged = [];
+  const maxLen = lists.reduce((m, l) => Math.max(m, l.length), 0);
+  for (let i = 0; i < maxLen; i++) {
+    for (const list of lists) {
+      if (i < list.length) merged.push(list[i]);
+    }
+  }
+  return merged;
+}
+
+/**
  * Generate a batch of feed items for a session (§7.2).
  */
 export async function generateFeed(sessionId, profileId, batchSize = 10) {
@@ -151,11 +169,20 @@ async function buildFetchQueues(ctx) {
       .select('hobby_id, angle, search_terms')
       .in('hobby_id', hobbyIds);
 
+    // Group terms per hobby so we can interleave across hobbies below —
+    // otherwise the queue is grouped by hobby and the fetcher drains the first
+    // one, skewing the batch to a single interest.
+    const interestByHobby = new Map();
+    const wildcardByHobby = new Map();
     for (const exp of (expansions ?? [])) {
-      const slotType = exp.angle === 'wildcard' ? 'wildcard' : 'interest';
+      const isWild = exp.angle === 'wildcard';
+      const group = isWild ? wildcardByHobby : interestByHobby;
+      if (!group.has(exp.hobby_id)) group.set(exp.hobby_id, []);
+      const list = group.get(exp.hobby_id);
+      const slotType = isWild ? 'wildcard' : 'interest';
       for (const bucket of budgetBuckets) {
         for (const term of (exp.search_terms ?? []).slice(0, 3)) {
-          queues[slotType].push({
+          list.push({
             term,
             bucket,
             meta: { hobby_id: exp.hobby_id, angle: exp.angle, slot_type: slotType },
@@ -163,6 +190,8 @@ async function buildFetchQueues(ctx) {
         }
       }
     }
+    queues.interest = interleaveByHobby(interestByHobby);
+    queues.wildcard = interleaveByHobby(wildcardByHobby);
   }
 
   if (hobbyIds.length >= 2) {

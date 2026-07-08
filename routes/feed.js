@@ -4,8 +4,10 @@
 
 import { generateFeed } from '../services/feed.js';
 import { processSignal } from '../services/signal.js';
+import { isProfileExpansionReady } from '../services/precompute.js';
 import { getDb } from '../db/index.js';
 import { signalSchema, validate } from './schemas.js';
+import { sendError } from './errors.js';
 
 export default async function feedRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate);
@@ -13,20 +15,30 @@ export default async function feedRoutes(fastify) {
   // GET /feed/:session_id — Get next batch of feed items
   fastify.get('/feed/:session_id', async (request, reply) => {
     const { session_id } = request.params;
-    const batch = parseInt(request.query.batch) || 10;
+    const batch = Math.min(Math.max(parseInt(request.query.batch) || 10, 1), 30);
     const sb = getDb();
 
     const { data: session, error } = await sb
       .from('sessions').select('*, profiles!inner(user_id)').eq('id', session_id).single();
-    if (error || !session) return reply.code(404).send({ error: 'Session not found' });
-    if (session.profiles.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+    if (error || !session) return sendError(reply, 404, 'This feed session no longer exists. Pull to refresh to start a new one.');
+    if (session.profiles.user_id !== request.user.id) return sendError(reply, 403, 'You don’t have access to this feed.');
 
     try {
       const items = await generateFeed(session_id, session.profile_id, batch);
-      return { items, count: items.length };
+      // Empty is a valid (not error) state — the profile's expansions may still
+      // be computing. `preparing` tells the app to keep polling vs. give up.
+      const preparing = items.length === 0
+        ? !(await isProfileExpansionReady(session.profile_id, session.occasion))
+        : false;
+      return { items, count: items.length, preparing };
     } catch (err) {
       console.error('[Feed] Generation error:', err);
-      return reply.code(500).send({ error: err.message });
+      return sendError(
+        reply,
+        503,
+        'We’re still building recommendations for this profile. Please pull to refresh in a moment.',
+        'FEED_UNAVAILABLE',
+      );
     }
   });
 
@@ -37,16 +49,16 @@ export default async function feedRoutes(fastify) {
     // Verify ownership via feed_event -> profile -> user
     const sb = getDb();
     const { data: event } = await sb.from('feed_events').select('profile_id').eq('id', feed_event_id).single();
-    if (!event) return reply.code(404).send({ error: 'Feed event not found' });
+    if (!event) return sendError(reply, 404, 'We couldn’t find that item.');
     const { data: profile } = await sb.from('profiles').select('user_id').eq('id', event.profile_id).single();
-    if (!profile || profile.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+    if (!profile || profile.user_id !== request.user.id) return sendError(reply, 403, 'You don’t have access to this item.');
 
     try {
       const result = await processSignal(feed_event_id, signal);
       return result;
     } catch (err) {
       console.error('[Feed] Signal error:', err);
-      return reply.code(500).send({ error: err.message });
+      return sendError(reply, 500, 'We couldn’t save your response. Please try again.');
     }
   });
 }

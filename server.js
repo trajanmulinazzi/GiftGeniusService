@@ -8,12 +8,17 @@ dotenv.config();
 
 import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
-import fastifyJwt from '@fastify/jwt';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, existsSync } from 'fs';
 
 import { startJobs } from './services/jobs.js';
+import { sendError } from './routes/errors.js';
+import {
+  verifyClerkToken,
+  resolveBackendUser,
+  isClerkConfigured,
+} from './services/clerk-auth.js';
 import authRoutes from './routes/auth.js';
 import profileRoutes from './routes/profiles.js';
 import hobbyRoutes from './routes/hobbies.js';
@@ -29,17 +34,41 @@ const fastify = Fastify({ logger: true });
 // CORS
 await fastify.register(fastifyCors, { origin: true });
 
-// JWT
-await fastify.register(fastifyJwt, {
-  secret: process.env.JWT_SECRET || 'dev-secret-change-in-production',
-});
+if (!isClerkConfigured()) {
+  fastify.log.warn(
+    'Clerk auth is not configured (set CLERK_PUBLISHABLE_KEY). Authenticated routes will reject all requests.'
+  );
+}
 
-// Auth decorators
+// Auth: verify the Clerk session token and resolve our backend user.
+// request.user.id is always our backend UUID.
 fastify.decorate('authenticate', async function (request, reply) {
+  // Gated dev bypass for local testing / the test console. OFF by default.
+  if (process.env.ALLOW_DEV_AUTH === 'true') {
+    const devUserId = request.headers['x-dev-user-id'];
+    if (devUserId) {
+      request.user = { id: devUserId, clerkId: `dev:${devUserId}`, email: null, name: 'Dev User' };
+      return;
+    }
+  }
+
+  const header = request.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return sendError(reply, 401, 'Sign in to continue.');
+  }
+  const token = header.slice(7).trim();
+
   try {
-    await request.jwtVerify();
+    const payload = await verifyClerkToken(token);
+    const user = await resolveBackendUser(payload.sub, {
+      email: payload.email,
+      name: payload.name,
+    });
+    request.user = { id: user.id, clerkId: payload.sub, email: user.email, name: user.name };
+    request.clerkPayload = payload;
   } catch (err) {
-    reply.code(401).send({ error: 'Unauthorized', message: err.message });
+    request.log.warn({ err: err.message }, 'Clerk auth failed');
+    return sendError(reply, 401, 'Your session has expired. Please sign in again.');
   }
 });
 
@@ -51,44 +80,40 @@ fastify.decorate('adminAuth', async function (req, reply) {
   }
   const provided = req.headers['x-admin-secret'];
   if (provided !== adminSecret) {
-    reply.code(403).send({ error: 'Forbidden', message: 'Invalid admin credentials' });
+    return sendError(reply, 403, 'Invalid admin credentials');
   }
 });
 
-// Global error handler — consistent error shape for all routes
+// Global error handler — consistent { error: { code, message } } shape.
 fastify.setErrorHandler((error, request, reply) => {
   const statusCode = error.statusCode || 500;
 
-  // Validation errors from Zod (thrown by our validate() helper)
+  // Validation errors from Zod (thrown by our validate() helper).
   if (error.validation) {
-    return reply.code(400).send({
-      error: 'Validation Error',
-      message: error.message,
-      details: error.validation,
-    });
+    const detail = Array.isArray(error.validation)
+      ? error.validation.map((v) => v.message).join('; ')
+      : error.message;
+    return sendError(reply, 400, detail || 'Some fields are invalid.', 'VALIDATION_ERROR');
   }
 
-  // Fastify built-in validation/404 errors
+  // Fastify built-in validation errors.
   if (error.code === 'FST_ERR_VALIDATION') {
-    return reply.code(400).send({
-      error: 'Bad Request',
-      message: error.message,
-    });
+    return sendError(reply, 400, error.message, 'VALIDATION_ERROR');
   }
 
-  // Don't leak internal details in production
+  // Don't leak internal details in production.
   if (statusCode >= 500) {
     request.log.error(error);
-    return reply.code(500).send({
-      error: 'Internal Server Error',
-      message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message,
-    });
+    return sendError(
+      reply,
+      500,
+      process.env.NODE_ENV === 'production'
+        ? 'Something went wrong on our end. Please try again.'
+        : error.message,
+    );
   }
 
-  return reply.code(statusCode).send({
-    error: error.name || 'Error',
-    message: error.message,
-  });
+  return sendError(reply, statusCode, error.message, error.code);
 });
 
 // Serve built test console from public/

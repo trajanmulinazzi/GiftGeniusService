@@ -6,6 +6,10 @@ import { getDb } from '../db/index.js';
 import { normalizeAmazonImageUrl } from '../services/amazon.js';
 import { loadAngles } from '../services/taxonomy.js';
 import { createProfileSchema, updateProfileSchema, validate } from './schemas.js';
+import { sendError } from './errors.js';
+
+const NOT_FOUND = 'We couldn’t find that profile.';
+const FORBIDDEN = 'You don’t have access to this profile.';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
@@ -15,17 +19,20 @@ export default async function profileRoutes(fastify) {
 
   // POST /profiles — Create a new recipient profile
   fastify.post('/profiles', async (request, reply) => {
-    const { label, hobby_ids, budget_min, budget_max } = validate(createProfileSchema, request.body);
+    const { label, hobby_ids, budget_min, budget_max, occasion } = validate(createProfileSchema, request.body);
     const user_id = request.user.id;
     const sb = getDb();
 
+    const insert = { user_id, label, hobby_ids, budget_min, budget_max };
+    if (occasion !== undefined) insert.occasion = occasion;
+
     const { data: profile, error } = await sb
       .from('profiles')
-      .insert({ user_id, label, hobby_ids, budget_min, budget_max })
+      .insert(insert)
       .select()
       .single();
 
-    if (error) return reply.code(400).send({ error: error.message });
+    if (error) return sendError(reply, 400, 'We couldn’t create that profile. Please check the details and try again.');
 
     // Initialize profile weights for all hobby × angle pairs
     const weightRows = [];
@@ -53,7 +60,7 @@ export default async function profileRoutes(fastify) {
       .select('*')
       .eq('user_id', user_id)
       .order('created_at', { ascending: false });
-    if (error) return reply.code(500).send({ error: error.message });
+    if (error) return sendError(reply, 500, 'We couldn’t load your profiles. Please try again.');
     return { data: data ?? [] };
   });
 
@@ -63,8 +70,8 @@ export default async function profileRoutes(fastify) {
     const { id } = request.params;
 
     const { data: profile } = await sb.from('profiles').select('user_id').eq('id', id).single();
-    if (!profile) return reply.code(404).send({ error: 'Profile not found' });
-    if (profile.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+    if (!profile) return sendError(reply, 404, NOT_FOUND);
+    if (profile.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
 
     const limit = Math.min(parseInt(request.query.limit) || 50, 200);
     const offset = parseInt(request.query.offset) || 0;
@@ -77,7 +84,7 @@ export default async function profileRoutes(fastify) {
       .order('acted_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
-    if (error) return reply.code(500).send({ error: error.message });
+    if (error) return sendError(reply, 500, 'We couldn’t load your saved items. Please try again.');
 
     const items = (data ?? []).map(row => {
       const snap = row.item_snapshot ?? {};
@@ -105,8 +112,8 @@ export default async function profileRoutes(fastify) {
 
     const { data: profile, error } = await sb
       .from('profiles').select('*').eq('id', id).single();
-    if (error || !profile) return reply.code(404).send({ error: 'Profile not found' });
-    if (profile.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+    if (error || !profile) return sendError(reply, 404, NOT_FOUND);
+    if (profile.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
 
     const { data: weightsData } = await sb
       .from('profile_weights')
@@ -130,16 +137,17 @@ export default async function profileRoutes(fastify) {
 
     // Verify ownership
     const { data: existing } = await sb.from('profiles').select('user_id').eq('id', id).single();
-    if (!existing) return reply.code(404).send({ error: 'Profile not found' });
-    if (existing.user_id !== request.user.id) return reply.code(403).send({ error: 'Forbidden' });
+    if (!existing) return sendError(reply, 404, NOT_FOUND);
+    if (existing.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
 
-    const { hobby_ids, budget_min, budget_max, label } = validate(updateProfileSchema, request.body);
+    const { hobby_ids, budget_min, budget_max, label, occasion } = validate(updateProfileSchema, request.body);
 
     const updates = { updated_at: new Date().toISOString() };
     if (hobby_ids !== undefined) updates.hobby_ids = hobby_ids;
     if (budget_min !== undefined) updates.budget_min = budget_min;
     if (budget_max !== undefined) updates.budget_max = budget_max;
     if (label !== undefined) updates.label = label;
+    if (occasion !== undefined) updates.occasion = occasion;
 
     await sb.from('profiles').update(updates).eq('id', id);
 

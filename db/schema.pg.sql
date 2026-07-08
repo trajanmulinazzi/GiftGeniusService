@@ -86,7 +86,10 @@ CREATE TABLE api_call_tracking (
 
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
+  -- Clerk identity (sub claim). NULL for legacy/seeded users; Postgres allows
+  -- multiple NULLs under UNIQUE, and the constraint lets us upsert by clerk id.
+  clerk_user_id TEXT UNIQUE,
+  name TEXT NOT NULL DEFAULT 'GiftGenius User',
   email TEXT UNIQUE,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
@@ -99,6 +102,7 @@ CREATE TABLE profiles (
   hobby_ids UUID[] NOT NULL,
   budget_min INT NOT NULL,
   budget_max INT NOT NULL,
+  occasion TEXT NOT NULL DEFAULT 'just_because',
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
