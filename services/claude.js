@@ -5,15 +5,23 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAngleDefinitions } from './taxonomy.js';
+import { sanitizeSearchTerms } from './product-filters.js';
 
 const ANGLE_DEFINITIONS = getAngleDefinitions();
 
 const MODEL = 'claude-sonnet-4-6';
 
+const NO_GIFT_CARD_RULES = `
+- NEVER include "gift card", "egift", "e-gift", or "gift certificate" in any query
+- For the "experience" angle, search for physical products that enable or enhance the experience
+  (gear, kits, accessories, books, tools) — NOT vouchers or stored-value cards
+- Amazon sells gift cards for many queries containing those words; we must avoid them`.trim();
+
 let _client = null;
 function getClient() {
-  if (_client) return _client;
-  _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (!_client) {
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
   return _client;
 }
 
@@ -42,6 +50,7 @@ Rules:
 - Avoid generic terms like "${hobbyName} gift" — be specific
 - Queries should work as literal Amazon search inputs
 - Budget context: products should generally fall in the $20-$200 range
+${NO_GIFT_CARD_RULES}
 - Return ONLY a JSON array of strings. No preamble, no explanation.
 
 Example output: ["japanese chef knife set","mandoline slicer with safety guard","cast iron spice grinder"]`;
@@ -53,7 +62,7 @@ Example output: ["japanese chef knife set","mandoline slicer with safety guard",
   });
 
   const text = response.content[0].text.trim();
-  return parseJsonResponse(text);
+  return sanitizeSearchTerms(parseJsonResponse(text));
 }
 
 /**
@@ -68,7 +77,10 @@ These should NOT be hobby-dependent — they are universal gift ideas for this o
 Occasion: ${occasion}
 Budget bucket: $${budgetBucket}
 
-Return ONLY a JSON array of strings.`;
+Rules:
+${NO_GIFT_CARD_RULES}
+- Prefer physical products someone would wrap and give
+- Return ONLY a JSON array of strings.`;
 
   const response = await client.messages.create({
     model: MODEL,
@@ -77,7 +89,7 @@ Return ONLY a JSON array of strings.`;
   });
 
   const text = response.content[0].text.trim();
-  return parseJsonResponse(text);
+  return sanitizeSearchTerms(parseJsonResponse(text));
 }
 
 /**
@@ -89,7 +101,10 @@ export async function expandCrossHobby(hobbyNames) {
   const prompt = `A person has the following hobbies: ${hobbyNames.join(', ')}.
 Generate 6-8 Amazon search terms for gifts that combine or sit at the intersection of these hobbies.
 These should be non-obvious — items they wouldn't find just searching for one hobby alone.
-Return ONLY a JSON array of strings.`;
+
+Rules:
+${NO_GIFT_CARD_RULES}
+- Return ONLY a JSON array of strings.`;
 
   const response = await client.messages.create({
     model: MODEL,
@@ -98,6 +113,6 @@ Return ONLY a JSON array of strings.`;
   });
 
   const text = response.content[0].text.trim();
-  return parseJsonResponse(text);
+  return sanitizeSearchTerms(parseJsonResponse(text));
 }
 

@@ -8,7 +8,7 @@ import { getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
-import { isGiftCardItem } from './product-filters.js';
+import { isGiftCardItem, isGiftCardSearchTerm, MAX_GIFT_CARDS_PER_BATCH } from './product-filters.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
@@ -262,7 +262,11 @@ async function buildFetchQueues(ctx) {
       const list = group.get(exp.hobby_id);
       const slotType = isWild ? 'wildcard' : 'interest';
       for (const bucket of budgetBuckets) {
-        for (const term of (exp.search_terms ?? []).slice(0, 3)) {
+        // Skip terms that explicitly search for gift cards (legacy Claude expansions).
+        const terms = (exp.search_terms ?? [])
+          .filter((term) => !isGiftCardSearchTerm(term))
+          .slice(0, 3);
+        for (const term of terms) {
           list.push({
             term,
             bucket,
@@ -299,7 +303,7 @@ async function buildFetchQueues(ctx) {
     }
 
     for (const bucket of budgetBuckets) {
-      for (const term of (crossTerms ?? []).slice(0, 3)) {
+      for (const term of (crossTerms ?? []).filter((t) => !isGiftCardSearchTerm(t)).slice(0, 3)) {
         queues.adjacent.push({
           term,
           bucket,
@@ -317,7 +321,7 @@ async function buildFetchQueues(ctx) {
       .in('budget_bucket', budgetBuckets);
 
     for (const row of (occasionRows ?? [])) {
-      for (const term of (row.search_terms ?? []).slice(0, 3)) {
+      for (const term of (row.search_terms ?? []).filter((t) => !isGiftCardSearchTerm(t)).slice(0, 3)) {
         queues.occasion.push({
           term,
           bucket: row.budget_bucket,
@@ -459,12 +463,18 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
   const feed = [];
   const usedAsins = new Set();
   const lastClusters = [];
+  let giftCardsPicked = 0;
 
   for (let i = 0; i < batchSize; i++) {
     const slotType = SLOT_PATTERN[i % SLOT_PATTERN.length];
+    const giftCardCapReached = giftCardsPicked >= MAX_GIFT_CARDS_PER_BATCH;
 
     let candidates = filtered
-      .filter(item => !usedAsins.has(item.asin) && item.slot_type === slotType)
+      .filter(item => {
+        if (usedAsins.has(item.asin) || item.slot_type !== slotType) return false;
+        if (giftCardCapReached && isGiftCardItem(item)) return false;
+        return true;
+      })
       .map(item => ({
         ...item,
         score: scoreItem(item, weights, asinLastSeen, lastClusters, relationship),
@@ -472,7 +482,11 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
 
     if (candidates.length === 0) {
       candidates = filtered
-        .filter(item => !usedAsins.has(item.asin))
+        .filter(item => {
+          if (usedAsins.has(item.asin)) return false;
+          if (giftCardCapReached && isGiftCardItem(item)) return false;
+          return true;
+        })
         .map(item => ({
           ...item,
           score: scoreItem(item, weights, asinLastSeen, lastClusters, relationship),
@@ -480,7 +494,13 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
     }
     if (candidates.length === 0) break;
 
-    candidates.sort((a, b) => b.score - a.score);
+    // Prefer real products over gift cards when scores are close.
+    candidates.sort((a, b) => {
+      const aGift = isGiftCardItem(a) ? 1 : 0;
+      const bGift = isGiftCardItem(b) ? 1 : 0;
+      if (aGift !== bGift) return aGift - bGift;
+      return b.score - a.score;
+    });
 
     let picked = null;
     for (const c of candidates) {
@@ -497,6 +517,7 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
 
     feed.push(picked);
     usedAsins.add(picked.asin);
+    if (isGiftCardItem(picked)) giftCardsPicked += 1;
     lastClusters.push(picked.hobby_id && picked.angle ? `${picked.hobby_id}:${picked.angle}` : 'none');
   }
 
