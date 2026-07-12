@@ -5,6 +5,10 @@
 import { getDb } from '../db/index.js';
 import { normalizeAmazonImageUrl } from '../services/amazon.js';
 import { loadAngles } from '../services/taxonomy.js';
+import {
+  removeInterestFromProfile,
+  syncHobbyChanges,
+} from '../services/profile-interests.js';
 import { createProfileSchema, updateProfileSchema, validate } from './schemas.js';
 import { sendError } from './errors.js';
 
@@ -130,13 +134,47 @@ export default async function profileRoutes(fastify) {
     return { ...profile, hobbies, weights: weightsData ?? [] };
   });
 
+  // DELETE /profiles/:id/interests/:hobby_id — Remove one interest from a profile
+  fastify.delete('/profiles/:id/interests/:hobby_id', async (request, reply) => {
+    const { id, hobby_id } = request.params;
+    const sb = getDb();
+
+    const { data: existing } = await sb
+      .from('profiles')
+      .select('user_id')
+      .eq('id', id)
+      .single();
+    if (!existing) return sendError(reply, 404, NOT_FOUND);
+    if (existing.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
+
+    try {
+      const result = await removeInterestFromProfile(id, hobby_id);
+      return result;
+    } catch (err) {
+      if (err.code === 'LAST_INTEREST') {
+        return sendError(reply, 400, err.message);
+      }
+      if (err.code === 'HOBBY_NOT_ON_PROFILE') {
+        return sendError(reply, 404, err.message);
+      }
+      if (err.code === 'NOT_FOUND') {
+        return sendError(reply, 404, NOT_FOUND);
+      }
+      request.log.error(err);
+      return sendError(reply, 500, 'We couldn’t remove that interest. Please try again.');
+    }
+  });
+
   // PATCH /profiles/:id — Update hobbies or budget
   fastify.patch('/profiles/:id', async (request, reply) => {
     const sb = getDb();
     const { id } = request.params;
 
-    // Verify ownership
-    const { data: existing } = await sb.from('profiles').select('user_id').eq('id', id).single();
+    const { data: existing } = await sb
+      .from('profiles')
+      .select('user_id, hobby_ids')
+      .eq('id', id)
+      .single();
     if (!existing) return sendError(reply, 404, NOT_FOUND);
     if (existing.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
 
@@ -149,22 +187,15 @@ export default async function profileRoutes(fastify) {
     if (label !== undefined) updates.label = label;
     if (occasion !== undefined) updates.occasion = occasion;
 
-    await sb.from('profiles').update(updates).eq('id', id);
+    try {
+      if (hobby_ids !== undefined) {
+        await syncHobbyChanges(id, existing.hobby_ids ?? [], hobby_ids);
+      }
 
-    // If hobby_ids changed, initialize new weights
-    if (hobby_ids) {
-      const weightRows = [];
-      for (const hobbyId of hobby_ids) {
-        for (const angle of ALL_ANGLES) {
-          weightRows.push({ profile_id: id, hobby_id: hobbyId, angle, weight: 1.0 });
-        }
-      }
-      if (weightRows.length > 0) {
-        await sb.from('profile_weights').upsert(weightRows, {
-          onConflict: 'profile_id,hobby_id,angle',
-          ignoreDuplicates: true,
-        });
-      }
+      await sb.from('profiles').update(updates).eq('id', id);
+    } catch (err) {
+      request.log.error(err);
+      return sendError(reply, 500, 'We couldn’t update this profile. Please try again.');
     }
 
     const { data: updated } = await sb.from('profiles').select('*').eq('id', id).single();
