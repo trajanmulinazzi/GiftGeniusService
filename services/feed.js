@@ -8,6 +8,7 @@ import { getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
+import { isGiftCardItem } from './product-filters.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
@@ -39,14 +40,65 @@ function interleaveByHobby(byHobby) {
   return merged;
 }
 
+function hobbyLabel(ctx, hobbyId) {
+  if (!hobbyId) return null;
+  return ctx.hobbyNames?.find((h) => h.id === hobbyId)?.name ?? hobbyId;
+}
+
+function logGiftCardHit(phase, item, extra = {}) {
+  console.log('[Feed][GiftCard]', {
+    phase,
+    title: item.title,
+    asin: item.asin,
+    search_term: item.source_term ?? null,
+    slot_type: item.slot_type ?? null,
+    angle: item.angle ?? null,
+    hobby_id: item.hobby_id ?? null,
+    hobby_name: extra.hobby_name ?? null,
+    budget_bucket: extra.budget_bucket ?? null,
+    ...extra,
+  });
+}
+
 /**
  * Generate a batch of feed items for a session (§7.2).
  */
 export async function generateFeed(sessionId, profileId, batchSize = 10) {
   const ctx = await loadFeedContext(sessionId, profileId);
+
+  console.log('[Feed] Profile interests for session', {
+    session_id: sessionId,
+    profile_id: profileId,
+    label: ctx.profile?.label,
+    relationship: ctx.profile?.relationship ?? null,
+    occasion: ctx.occasion,
+    budget: [ctx.profile?.budget_min, ctx.profile?.budget_max],
+    interests: (ctx.hobbyNames ?? []).map((h) => ({ id: h.id, name: h.name })),
+  });
+
   const queues = await buildFetchQueues(ctx);
+  console.log('[Feed] Fetch queue sizes', {
+    interest: queues.interest.length,
+    adjacent: queues.adjacent.length,
+    wildcard: queues.wildcard.length,
+    occasion: queues.occasion.length,
+  });
+
   const itemPool = await fetchItemPoolIncremental(queues, ctx, batchSize);
   const filtered = filterItemPool(itemPool, ctx);
+
+  const giftCardsInPool = filtered.filter(isGiftCardItem);
+  console.log('[Feed] Pool summary', {
+    pool: itemPool.length,
+    after_filters: filtered.length,
+    gift_cards_in_filtered_pool: giftCardsInPool.length,
+  });
+  for (const item of giftCardsInPool) {
+    logGiftCardHit('in_filtered_pool', item, {
+      hobby_name: hobbyLabel(ctx, item.hobby_id),
+    });
+  }
+
   const feed = fillFeedSlots(
     filtered,
     batchSize,
@@ -54,6 +106,15 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
     ctx.asinLastSeen,
     ctx.profile?.relationship ?? null,
   );
+
+  for (const item of feed) {
+    if (isGiftCardItem(item)) {
+      logGiftCardHit('served_in_batch', item, {
+        hobby_name: hobbyLabel(ctx, item.hobby_id),
+        score: item.score,
+      });
+    }
+  }
 
   return insertFeedEvents(ctx.sb, sessionId, profileId, feed, ctx.hobbyNames);
 }
@@ -334,7 +395,24 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
     const results = await Promise.all(
       chunk.map(async ({ term, bucket, meta }) => {
         const items = await getItemsForSearchTerm(term, bucket);
-        return items.map(item => ({ ...item, ...meta, source_term: term }));
+        const tagged = items.map(item => ({ ...item, ...meta, source_term: term }));
+
+        const giftCards = tagged.filter(isGiftCardItem);
+        if (giftCards.length > 0) {
+          console.log('[Feed][GiftCard] Amazon/cache results for search', {
+            search_term: term,
+            budget_bucket: bucket,
+            slot_type: meta.slot_type,
+            angle: meta.angle,
+            hobby_id: meta.hobby_id,
+            hobby_name: hobbyLabel(ctx, meta.hobby_id),
+            total_items: tagged.length,
+            gift_card_count: giftCards.length,
+            gift_card_titles: giftCards.map((g) => g.title),
+          });
+        }
+
+        return tagged;
       })
     );
     for (const items of results) itemPool.push(...items);
