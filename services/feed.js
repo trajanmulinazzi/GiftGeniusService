@@ -55,7 +55,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
     ctx.profile?.relationship ?? null,
   );
 
-  return insertFeedEvents(ctx.sb, sessionId, profileId, feed);
+  return insertFeedEvents(ctx.sb, sessionId, profileId, feed, ctx.hobbyNames);
 }
 
 /**
@@ -412,8 +412,28 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
   return feed;
 }
 
-async function insertFeedEvents(sb, sessionId, profileId, feed) {
+async function insertFeedEvents(sb, sessionId, profileId, feed, hobbyRows = []) {
   if (feed.length === 0) return [];
+
+  const hobbyNameById = new Map((hobbyRows ?? []).map((h) => [h.id, h.name]));
+
+  // Resolve any hobby_ids not already loaded with the profile (rare).
+  const missingIds = [
+    ...new Set(
+      feed
+        .map((item) => item.hobby_id)
+        .filter((id) => id && !hobbyNameById.has(id))
+    ),
+  ];
+  if (missingIds.length > 0) {
+    const { data: extra } = await sb
+      .from('hobbies')
+      .select('id, name')
+      .in('id', missingIds);
+    for (const row of extra ?? []) {
+      hobbyNameById.set(row.id, row.name);
+    }
+  }
 
   const rows = feed.map(item => ({
     session_id: sessionId,
@@ -439,6 +459,7 @@ async function insertFeedEvents(sb, sessionId, profileId, feed) {
     category: item.category,
     slot_type: item.slot_type,
     hobby_id: item.hobby_id,
+    hobby_name: item.hobby_id ? (hobbyNameById.get(item.hobby_id) ?? null) : null,
     angle: item.angle,
     score: item.score,
   }));

@@ -91,6 +91,18 @@ export default async function profileRoutes(fastify) {
 
     if (error) return sendError(reply, 500, 'We couldn’t load your saved items. Please try again.');
 
+    const hobbyIds = [...new Set((data ?? []).map((row) => row.hobby_id).filter(Boolean))];
+    const hobbyNameById = new Map();
+    if (hobbyIds.length > 0) {
+      const { data: hobbyRows } = await sb
+        .from('hobbies')
+        .select('id, name')
+        .in('id', hobbyIds);
+      for (const row of hobbyRows ?? []) {
+        hobbyNameById.set(row.id, row.name);
+      }
+    }
+
     const items = (data ?? []).map(row => {
       const snap = row.item_snapshot ?? {};
       return {
@@ -102,6 +114,7 @@ export default async function profileRoutes(fastify) {
         product_url: snap.product_url ?? '',
         slot_type: row.slot_type,
         hobby_id: row.hobby_id,
+        hobby_name: row.hobby_id ? (hobbyNameById.get(row.hobby_id) ?? null) : null,
         angle: row.angle,
         saved_at: row.acted_at,
       };
