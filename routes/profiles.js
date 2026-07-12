@@ -23,12 +23,13 @@ export default async function profileRoutes(fastify) {
 
   // POST /profiles — Create a new recipient profile
   fastify.post('/profiles', async (request, reply) => {
-    const { label, hobby_ids, budget_min, budget_max, occasion } = validate(createProfileSchema, request.body);
+    const { label, hobby_ids, budget_min, budget_max, occasion, relationship } = validate(createProfileSchema, request.body);
     const user_id = request.user.id;
     const sb = getDb();
 
     const insert = { user_id, label, hobby_ids, budget_min, budget_max };
     if (occasion !== undefined) insert.occasion = occasion;
+    if (relationship !== undefined) insert.relationship = relationship;
 
     const { data: profile, error } = await sb
       .from('profiles')
@@ -178,7 +179,7 @@ export default async function profileRoutes(fastify) {
     if (!existing) return sendError(reply, 404, NOT_FOUND);
     if (existing.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
 
-    const { hobby_ids, budget_min, budget_max, label, occasion } = validate(updateProfileSchema, request.body);
+    const { hobby_ids, budget_min, budget_max, label, occasion, relationship } = validate(updateProfileSchema, request.body);
 
     const updates = { updated_at: new Date().toISOString() };
     if (hobby_ids !== undefined) updates.hobby_ids = hobby_ids;
@@ -186,6 +187,7 @@ export default async function profileRoutes(fastify) {
     if (budget_max !== undefined) updates.budget_max = budget_max;
     if (label !== undefined) updates.label = label;
     if (occasion !== undefined) updates.occasion = occasion;
+    if (relationship !== undefined) updates.relationship = relationship;
 
     try {
       if (hobby_ids !== undefined) {

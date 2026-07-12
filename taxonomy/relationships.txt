@@ -1,0 +1,16 @@
+mom
+dad
+partner
+boyfriend
+girlfriend
+spouse
+friend
+best_friend
+sibling
+grandparent
+coworker
+boss
+child
+niece_nephew
+acquaintance
+other

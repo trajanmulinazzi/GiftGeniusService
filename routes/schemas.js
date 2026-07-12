@@ -9,6 +9,13 @@ const uuid = z.string().uuid();
 // ── Occasions (shared) ───────────────────────────────────
 const OCCASIONS = ['birthday', 'christmas', 'mothers_day', 'fathers_day', 'anniversary', 'graduation', 'housewarming', 'just_because'];
 
+// ── Relationships (optional profile soft prior) ──────────
+const RELATIONSHIPS = [
+  'mom', 'dad', 'partner', 'boyfriend', 'girlfriend', 'spouse',
+  'friend', 'best_friend', 'sibling', 'grandparent', 'coworker',
+  'boss', 'child', 'niece_nephew', 'acquaintance', 'other',
+];
+
 // ── Profiles ─────────────────────────────────────────────
 export const createProfileSchema = z.object({
   label: z.string().min(1).max(100),
@@ -16,6 +23,7 @@ export const createProfileSchema = z.object({
   budget_min: z.number().int().min(0),
   budget_max: z.number().int().min(1),
   occasion: z.enum(OCCASIONS).optional(),
+  relationship: z.enum(RELATIONSHIPS).nullable().optional(),
 }).refine(d => d.budget_max > d.budget_min, {
   message: 'budget_max must be greater than budget_min',
 });
@@ -26,6 +34,7 @@ export const updateProfileSchema = z.object({
   budget_min: z.number().int().min(0).optional(),
   budget_max: z.number().int().min(1).optional(),
   occasion: z.enum(OCCASIONS).optional(),
+  relationship: z.enum(RELATIONSHIPS).nullable().optional(),
 }).refine(d => {
   if (d.budget_min !== undefined && d.budget_max !== undefined) {
     return d.budget_max > d.budget_min;

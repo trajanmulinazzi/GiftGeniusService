@@ -103,6 +103,7 @@ CREATE TABLE profiles (
   budget_min INT NOT NULL,
   budget_max INT NOT NULL,
   occasion TEXT NOT NULL DEFAULT 'just_because',
+  relationship TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );

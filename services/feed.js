@@ -7,6 +7,7 @@ import { getDb } from '../db/index.js';
 import { getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
+import { relationshipAngleMultiplier } from './relationship-priors.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
@@ -46,7 +47,13 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
   const queues = await buildFetchQueues(ctx);
   const itemPool = await fetchItemPoolIncremental(queues, ctx, batchSize);
   const filtered = filterItemPool(itemPool, ctx);
-  const feed = fillFeedSlots(filtered, batchSize, ctx.weights, ctx.asinLastSeen);
+  const feed = fillFeedSlots(
+    filtered,
+    batchSize,
+    ctx.weights,
+    ctx.asinLastSeen,
+    ctx.profile?.relationship ?? null,
+  );
 
   return insertFeedEvents(ctx.sb, sessionId, profileId, feed);
 }
@@ -353,11 +360,11 @@ function filterItemPool(itemPool, ctx) {
   });
 }
 
-function canFillFeedSlots(filtered, batchSize, weights, asinLastSeen) {
-  return fillFeedSlots(filtered, batchSize, weights, asinLastSeen).length >= batchSize;
+function canFillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship = null) {
+  return fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship).length >= batchSize;
 }
 
-function fillFeedSlots(filtered, batchSize, weights, asinLastSeen) {
+function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship = null) {
   const feed = [];
   const usedAsins = new Set();
   const lastClusters = [];
@@ -367,12 +374,18 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen) {
 
     let candidates = filtered
       .filter(item => !usedAsins.has(item.asin) && item.slot_type === slotType)
-      .map(item => ({ ...item, score: scoreItem(item, weights, asinLastSeen, lastClusters) }));
+      .map(item => ({
+        ...item,
+        score: scoreItem(item, weights, asinLastSeen, lastClusters, relationship),
+      }));
 
     if (candidates.length === 0) {
       candidates = filtered
         .filter(item => !usedAsins.has(item.asin))
-        .map(item => ({ ...item, score: scoreItem(item, weights, asinLastSeen, lastClusters) }));
+        .map(item => ({
+          ...item,
+          score: scoreItem(item, weights, asinLastSeen, lastClusters, relationship),
+        }));
     }
     if (candidates.length === 0) break;
 
@@ -433,9 +446,10 @@ async function insertFeedEvents(sb, sessionId, profileId, feed) {
 
 /**
  * Score an item (§7.3).
- * score = baseWeight * cooldownMultiplier * recencyBonus * diversityBonus + noise
+ * score = baseWeight * cooldown * recency * diversity * relationshipPrior + noise
+ * Relationship prior is mild (±~8% max) and only applies when angle is known.
  */
-function scoreItem(item, weights, asinLastSeen, recentClusters) {
+function scoreItem(item, weights, asinLastSeen, recentClusters, relationship = null) {
   const clusterKey = item.hobby_id && item.angle ? `${item.hobby_id}:${item.angle}` : null;
   const w = clusterKey ? weights[clusterKey] : null;
   const baseWeight = w?.weight ?? 1.0;
@@ -451,5 +465,14 @@ function scoreItem(item, weights, asinLastSeen, recentClusters) {
   const last2 = recentClusters.slice(-2);
   const diversityBonus = (clusterKey && last2.includes(clusterKey)) ? 0.5 : 1.2;
 
-  return baseWeight * cooldownMultiplier * recencyBonus * diversityBonus + (Math.random() * 0.1);
+  const relMultiplier = relationshipAngleMultiplier(relationship, item.angle);
+
+  return (
+    baseWeight *
+      cooldownMultiplier *
+      recencyBonus *
+      diversityBonus *
+      relMultiplier +
+    Math.random() * 0.1
+  );
 }

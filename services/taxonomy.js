@@ -38,6 +38,10 @@ export function loadOccasions() {
   return readLines('occasions.txt');
 }
 
+export function loadRelationships() {
+  return readLines('relationships.txt');
+}
+
 export function getBucketRanges() {
   const buckets = loadBudgetBuckets();
   const ranges = {};

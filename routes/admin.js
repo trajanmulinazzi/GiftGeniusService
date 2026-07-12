@@ -5,7 +5,7 @@
 import { getDb } from '../db/index.js';
 import { runPrecompute } from '../services/precompute.js';
 import { refreshExpiringCache, getDailyApiUsage } from '../services/amazon.js';
-import { syncAll, loadAngles, loadBudgetBuckets, loadOccasions } from '../services/taxonomy.js';
+import { syncAll, loadAngles, loadBudgetBuckets, loadOccasions, loadRelationships } from '../services/taxonomy.js';
 import { createUserSchema, addHobbiesSchema, validate } from './schemas.js';
 import { sendError } from './errors.js';
 
@@ -27,6 +27,7 @@ export default async function adminRoutes(fastify) {
     angles: loadAngles(),
     budget_buckets: loadBudgetBuckets(),
     occasions: loadOccasions(),
+    relationships: loadRelationships(),
   }));
 
   // POST /admin/precompute — Trigger pre-computation pipeline
