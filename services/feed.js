@@ -45,8 +45,18 @@ function hobbyLabel(ctx, hobbyId) {
   return ctx.hobbyNames?.find((h) => h.id === hobbyId)?.name ?? hobbyId;
 }
 
-function logGiftCardHit(phase, item, extra = {}) {
-  console.log('[Feed][GiftCard]', {
+/** Prefer Fastify/pino logger so Render shows structured JSON like other request logs. */
+function feedLog(ctx, msg, data = {}) {
+  const payload = { feed: true, ...data };
+  if (ctx?.log?.info) {
+    ctx.log.info(payload, msg);
+  } else {
+    console.log(msg, payload);
+  }
+}
+
+function logGiftCardHit(ctx, phase, item, extra = {}) {
+  feedLog(ctx, '[Feed][GiftCard]', {
     phase,
     title: item.title,
     asin: item.asin,
@@ -62,11 +72,14 @@ function logGiftCardHit(phase, item, extra = {}) {
 
 /**
  * Generate a batch of feed items for a session (§7.2).
+ * @param {object} [options]
+ * @param {import('fastify').FastifyBaseLogger} [options.log] Fastify request logger (shows on Render)
  */
-export async function generateFeed(sessionId, profileId, batchSize = 10) {
+export async function generateFeed(sessionId, profileId, batchSize = 10, options = {}) {
   const ctx = await loadFeedContext(sessionId, profileId);
+  ctx.log = options.log ?? null;
 
-  console.log('[Feed] Profile interests for session', {
+  feedLog(ctx, '[Feed] Profile interests for session', {
     session_id: sessionId,
     profile_id: profileId,
     label: ctx.profile?.label,
@@ -77,7 +90,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
   });
 
   const queues = await buildFetchQueues(ctx);
-  console.log('[Feed] Fetch queue sizes', {
+  feedLog(ctx, '[Feed] Fetch queue sizes', {
     interest: queues.interest.length,
     adjacent: queues.adjacent.length,
     wildcard: queues.wildcard.length,
@@ -88,13 +101,13 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
   const filtered = filterItemPool(itemPool, ctx);
 
   const giftCardsInPool = filtered.filter(isGiftCardItem);
-  console.log('[Feed] Pool summary', {
+  feedLog(ctx, '[Feed] Pool summary', {
     pool: itemPool.length,
     after_filters: filtered.length,
     gift_cards_in_filtered_pool: giftCardsInPool.length,
   });
   for (const item of giftCardsInPool) {
-    logGiftCardHit('in_filtered_pool', item, {
+    logGiftCardHit(ctx, 'in_filtered_pool', item, {
       hobby_name: hobbyLabel(ctx, item.hobby_id),
     });
   }
@@ -109,7 +122,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10) {
 
   for (const item of feed) {
     if (isGiftCardItem(item)) {
-      logGiftCardHit('served_in_batch', item, {
+      logGiftCardHit(ctx, 'served_in_batch', item, {
         hobby_name: hobbyLabel(ctx, item.hobby_id),
         score: item.score,
       });
@@ -399,7 +412,7 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
 
         const giftCards = tagged.filter(isGiftCardItem);
         if (giftCards.length > 0) {
-          console.log('[Feed][GiftCard] Amazon/cache results for search', {
+          feedLog(ctx, '[Feed][GiftCard] Amazon/cache results for search', {
             search_term: term,
             budget_bucket: bucket,
             slot_type: meta.slot_type,

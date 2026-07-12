@@ -24,7 +24,9 @@ export default async function feedRoutes(fastify) {
     if (session.profiles.user_id !== request.user.id) return sendError(reply, 403, 'You don’t have access to this feed.');
 
     try {
-      const items = await generateFeed(session_id, session.profile_id, batch);
+      const items = await generateFeed(session_id, session.profile_id, batch, {
+        log: request.log,
+      });
       // Empty is a valid (not error) state — the profile's expansions may still
       // be computing. `preparing` tells the app to keep polling vs. give up.
       const preparing = items.length === 0
@@ -32,7 +34,7 @@ export default async function feedRoutes(fastify) {
         : false;
       return { items, count: items.length, preparing };
     } catch (err) {
-      console.error('[Feed] Generation error:', err);
+      request.log.error({ err }, '[Feed] Generation error');
       return sendError(
         reply,
         503,
