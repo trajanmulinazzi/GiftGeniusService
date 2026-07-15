@@ -9,7 +9,13 @@ import {
   removeInterestFromProfile,
   syncHobbyChanges,
 } from '../services/profile-interests.js';
-import { createProfileSchema, updateProfileSchema, validate } from './schemas.js';
+import { copySavedItem, unsaveItem } from '../services/saved-items.js';
+import {
+  copySavedItemSchema,
+  createProfileSchema,
+  updateProfileSchema,
+  validate,
+} from './schemas.js';
 import { sendError } from './errors.js';
 
 const NOT_FOUND = 'We couldn’t find that profile.';
@@ -121,6 +127,57 @@ export default async function profileRoutes(fastify) {
     });
 
     return { items, count: items.length, total: count ?? 0, limit, offset };
+  });
+
+  // POST /profiles/:id/saved/:feed_event_id/copy — Copy a bookmark onto another profile
+  fastify.post('/profiles/:id/saved/:feed_event_id/copy', async (request, reply) => {
+    const { id, feed_event_id } = request.params;
+    const { target_profile_id } = validate(copySavedItemSchema, request.body);
+
+    try {
+      const result = await copySavedItem({
+        sourceProfileId: id,
+        feedEventId: feed_event_id,
+        targetProfileId: target_profile_id,
+        userId: request.user.id,
+      });
+      return result;
+    } catch (err) {
+      if (err.code === 'SAME_PROFILE') {
+        return sendError(reply, 400, err.message);
+      }
+      if (err.code === 'NOT_FOUND') {
+        return sendError(reply, 404, err.message);
+      }
+      if (err.code === 'FORBIDDEN') {
+        return sendError(reply, 403, err.message);
+      }
+      request.log.error(err);
+      return sendError(reply, 500, 'We couldn’t copy that saved item. Please try again.');
+    }
+  });
+
+  // DELETE /profiles/:id/saved/:feed_event_id — Remove a bookmark from this profile
+  fastify.delete('/profiles/:id/saved/:feed_event_id', async (request, reply) => {
+    const { id, feed_event_id } = request.params;
+
+    try {
+      const result = await unsaveItem({
+        profileId: id,
+        feedEventId: feed_event_id,
+        userId: request.user.id,
+      });
+      return result;
+    } catch (err) {
+      if (err.code === 'NOT_FOUND') {
+        return sendError(reply, 404, err.message);
+      }
+      if (err.code === 'FORBIDDEN') {
+        return sendError(reply, 403, err.message);
+      }
+      request.log.error(err);
+      return sendError(reply, 500, 'We couldn’t remove that saved item. Please try again.');
+    }
   });
 
   // GET /profiles/:id — Get profile with current weights summary

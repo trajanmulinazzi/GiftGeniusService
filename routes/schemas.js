@@ -57,6 +57,10 @@ export const signalSchema = z.object({
   signal: z.enum(SIGNALS),
 });
 
+export const copySavedItemSchema = z.object({
+  target_profile_id: uuid,
+});
+
 // ── Admin ────────────────────────────────────────────────
 export const createUserSchema = z.object({
   name: z.string().min(1).max(100),
