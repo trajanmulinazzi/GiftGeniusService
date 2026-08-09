@@ -1,58 +1,61 @@
 /**
- * Amazon Creators API service — search + cache layer.
- * Uses Supabase JS client for cache storage (HTTPS).
+ * Amazon product data service — backed by the Canopy API (REST).
+ *
+ * Canopy provides Amazon catalog/search data; we lost access to the Amazon
+ * Creators API, so this module swaps the underlying provider while keeping the
+ * same public surface (getItemsForSearchTerm / refreshExpiringCache /
+ * getDailyApiUsage / resolveBudgetBuckets / normalizeAmazonImageUrl) and the
+ * same cached item shape so downstream feed/precompute code is unchanged.
+ *
+ * Uses the global fetch (Node 18+) for HTTPS calls and the Supabase JS client
+ * for cache storage.
  */
 
-import { createRequire } from 'module';
 import crypto from 'crypto';
 import { getDb } from '../db/index.js';
 import { loadAngles, loadBudgetBuckets, getBucketRanges } from './taxonomy.js';
-
-const require = createRequire(import.meta.url);
-const { ApiClient, DefaultApi, SearchItemsRequestContent } = require('amazon-creators-api');
 
 // ── Taxonomy-driven constants (read from .txt files) ──────
 const ALL_ANGLES = loadAngles().map(a => a.name);
 const ALL_BUDGET_BUCKETS = loadBudgetBuckets();
 const BUCKET_RANGES = getBucketRanges();
 
-const DAILY_CALL_LIMIT = 8500;
-const DAILY_CALL_ALERT = 7500;
+// Canopy REST quota is plan-dependent; keep a defensive daily ceiling so a
+// runaway job can never drain the account. Override via env if the plan differs.
+const DAILY_CALL_LIMIT = Number(process.env.CANOPY_DAILY_CALL_LIMIT ?? 8500);
+const DAILY_CALL_ALERT = Number(process.env.CANOPY_DAILY_CALL_ALERT ?? 7500);
 const CACHE_TTL_HOURS = 48;
-const MARKETPLACE = 'www.amazon.com';
-const MIN_REQUEST_INTERVAL_MS = 1200; // slightly over 1 TPS to stay safely under PA-API limit
+
+// Canopy is a REST API (higher throughput than PA-API's ~1 TPS), but we still
+// pace calls to stay polite and under plan rate limits.
+const MIN_REQUEST_INTERVAL_MS = Number(process.env.CANOPY_MIN_INTERVAL_MS ?? 250);
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000; // exponential backoff: 2s, 4s, 8s
 
+const CANOPY_SEARCH_URL = 'https://rest.canopyapi.co/api/amazon/search';
+const CANOPY_DOMAIN = process.env.CANOPY_DOMAIN ?? 'US';
+const REQUEST_TIMEOUT_MS = 15000;
+
+// Max results to keep per search (Canopy returns ~60/page; a slice keeps cache
+// rows small while still giving the feed plenty of candidates per API call).
+const SEARCH_ITEM_COUNT = Number(process.env.CANOPY_SEARCH_ITEM_COUNT ?? 20);
+
 const IMAGE_LONGEST_EDGE_PX = 500;
 
-const SEARCH_RESOURCES = [
-  'images.primary.large',
-  'itemInfo.title',
-  'itemInfo.classifications',
-  'offersV2.listings.price',
-];
-
-/** Upscale Amazon CDN thumbnails (e.g. _SL160_) for sharper swipe cards. */
+/**
+ * Upscale Amazon CDN thumbnails for sharper swipe cards by rewriting the size
+ * token in the image URL. Handles both legacy Creators-API URLs (`._SL160_.`)
+ * and Canopy URLs (`._AC_UL320_.`, `._AC_SX466_.`, …). Leaves untokenized URLs
+ * untouched.
+ */
 export function normalizeAmazonImageUrl(url) {
   if (!url) return url;
-  return url.replace(/\._SL(\d+)_\./, (match, size) => {
-    const px = parseInt(size, 10);
-    return px >= IMAGE_LONGEST_EDGE_PX ? match : `._SL${IMAGE_LONGEST_EDGE_PX}_.`;
-  });
-}
-
-// ── API Client Singleton ──────────────────────────────────
-let _api = null;
-
-function getApi() {
-  if (_api) return _api;
-  const client = new ApiClient();
-  client.credentialId = process.env.AMAZON_CREDENTIAL_ID;
-  client.credentialSecret = process.env.AMAZON_CREDENTIAL_SECRET;
-  client.version = process.env.AMAZON_CREDENTIAL_VERSION;
-  _api = new DefaultApi(client);
-  return _api;
+  // Match the trailing Amazon image size modifier segment, e.g.
+  //   ._SL160_.jpg   ._AC_UL320_.jpg   ._AC_SX466_.png
+  return url.replace(
+    /\.(_[A-Z0-9]+(?:_[A-Z0-9]+)*_)\.(jpg|jpeg|png|webp|gif)$/i,
+    (_m, _token, ext) => `._AC_UL${IMAGE_LONGEST_EDGE_PX}_.${ext}`,
+  );
 }
 
 // ── Budget Bucket Resolution ──────────────────────────────
@@ -82,7 +85,7 @@ async function incrementDailyCallCount() {
   const { data } = await sb.rpc('increment_daily_calls', { p_date: today });
   const count = data ?? 0;
   if (count >= DAILY_CALL_ALERT) {
-    console.warn(`[Amazon] Daily API call count: ${count} (limit: ${DAILY_CALL_LIMIT})`);
+    console.warn(`[Canopy] Daily API call count: ${count} (limit: ${DAILY_CALL_LIMIT})`);
   }
   return count;
 }
@@ -100,49 +103,87 @@ async function throttle() {
   }
 }
 
-// ── Raw Amazon API Call (with retry + backoff) ───────────
-async function callAmazonAPI(searchTerm, minPrice, maxPrice) {
-  const api = getApi();
-  const req = new SearchItemsRequestContent();
-  req.partnerTag = process.env.AMAZON_PARTNER_TAG;
-  req.keywords = searchTerm;
-  req.itemCount = 10;
-  if (minPrice > 0) req.minPrice = minPrice * 100;
-  if (maxPrice < 9999) req.maxPrice = maxPrice * 100;
-  req.resources = SEARCH_RESOURCES;
+// ── Product URL / affiliate tagging ───────────────────────
+/** Build a clean canonical Amazon product URL, tagged if an affiliate tag is set. */
+function buildProductUrl(asin) {
+  const tag = process.env.AMAZON_PARTNER_TAG;
+  const base = `https://www.amazon.com/dp/${asin}`;
+  return tag ? `${base}?tag=${tag}` : base;
+}
+
+/** Map a single Canopy search result into our cached item shape. */
+function mapSearchResult(result) {
+  const asin = result?.asin;
+  if (!asin) return null;
+  return {
+    asin,
+    title: result.title ?? '',
+    price: result.price?.value ?? 0,
+    image_url: normalizeAmazonImageUrl(result.mainImageUrl ?? ''),
+    product_url: buildProductUrl(asin),
+    // Canopy search results don't carry a category; keep the historical default
+    // so downstream consumers (feed/client) see a consistent field.
+    category: 'General',
+    fetched_at: new Date().toISOString(),
+  };
+}
+
+// ── Raw Canopy API Call (with retry + backoff) ───────────
+async function callCanopyAPI(searchTerm, minPrice, maxPrice) {
+  const apiKey = process.env.CANOPY_API_KEY;
+  if (!apiKey) throw new Error('CANOPY_API_KEY is not set');
+
+  const params = new URLSearchParams({
+    searchTerm,
+    domain: CANOPY_DOMAIN,
+  });
+  // Canopy filters server-side by price in dollars (inclusive band).
+  if (minPrice > 0) params.set('minPrice', String(minPrice));
+  if (maxPrice < 9999) params.set('maxPrice', String(maxPrice));
+
+  const url = `${CANOPY_SEARCH_URL}?${params.toString()}`;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     await throttle();
     try {
-      const response = await api.searchItems(MARKETPLACE, { searchItemsRequestContent: req });
-      return (response?.searchResult?.items ?? []).map(item => ({
-        asin: item.asin,
-        title: item.itemInfo?.title?.displayValue ?? '',
-        price: extractPrice(item),
-        image_url: normalizeAmazonImageUrl(item.images?.primary?.large?.url ?? ''),
-        product_url: item.detailPageURL ?? `https://www.amazon.com/dp/${item.asin}?tag=${process.env.AMAZON_PARTNER_TAG}`,
-        category: item.itemInfo?.classifications?.binding?.displayValue ?? 'General',
-        fetched_at: new Date().toISOString(),
-      }));
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      let response;
+      try {
+        response = await fetch(url, {
+          method: 'GET',
+          headers: { 'API-KEY': apiKey, 'Content-Type': 'application/json' },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      if (!response.ok) {
+        const err = new Error(`Canopy API ${response.status} for "${searchTerm}"`);
+        err.statusCode = response.status;
+        throw err;
+      }
+
+      const body = await response.json();
+      const results = body?.data?.amazonProductSearchResults?.productResults?.results ?? [];
+      return results
+        .slice(0, SEARCH_ITEM_COUNT)
+        .map(mapSearchResult)
+        .filter(Boolean);
     } catch (err) {
-      const status = err.statusCode ?? err.status ?? err.$metadata?.httpStatusCode;
-      if (status === 429 && attempt < MAX_RETRIES) {
+      const status = err.statusCode ?? err.status;
+      const retryable = status === 429 || status === 500 || status === 502
+        || status === 503 || status === 504 || err.name === 'AbortError';
+      if (retryable && attempt < MAX_RETRIES) {
         const backoff = RETRY_BASE_MS * Math.pow(2, attempt);
-        console.warn(`[Amazon] 429 for "${searchTerm}", retrying in ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        console.warn(`[Canopy] ${status ?? err.name} for "${searchTerm}", retrying in ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, backoff));
         continue;
       }
       throw err;
     }
   }
-}
-
-function extractPrice(item) {
-  const listings = item.offersV2?.listings;
-  if (!listings || listings.length === 0) return 0;
-  const listing = listings.find(l => l.isBuyBoxWinner) ?? listings[0];
-  // Creators API nests amount under price.money (not price.amount)
-  return listing?.price?.money?.amount ?? listing?.price?.amount ?? 0;
 }
 
 function cacheItemsNeedRefresh(items) {
@@ -170,7 +211,7 @@ async function writeCacheEntry(sb, { cache_key, search_term, budget_bucket, item
 
 async function refreshCacheRow(sb, row) {
   const [minPrice, maxPrice] = BUCKET_RANGES[row.budget_bucket] ?? [0, 9999];
-  const items = await callAmazonAPI(row.search_term, minPrice, maxPrice);
+  const items = await callCanopyAPI(row.search_term, minPrice, maxPrice);
   await sb.from('amazon_cache').update({
     items,
     expires_at: cacheExpiresAt(),
@@ -209,19 +250,19 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
   // Check daily limit
   const dailyCount = await getDailyCallCount();
   if (dailyCount >= DAILY_CALL_LIMIT) {
-    console.warn(`[Amazon] Daily API limit reached (${dailyCount}). Skipping: ${searchTerm}`);
+    console.warn(`[Canopy] Daily API limit reached (${dailyCount}). Skipping: ${searchTerm}`);
     return [];
   }
 
-  // Call Amazon API
+  // Call Canopy API
   const [minPrice, maxPrice] = BUCKET_RANGES[bucket] ?? [0, 9999];
   try {
-    const items = await callAmazonAPI(searchTerm, minPrice, maxPrice);
+    const items = await callCanopyAPI(searchTerm, minPrice, maxPrice);
     await writeCacheEntry(sb, { cache_key: key, search_term: searchTerm, budget_bucket: bucket, items });
     await incrementDailyCallCount();
     return items;
   } catch (err) {
-    console.error(`[Amazon] API error for "${searchTerm}" [${bucket}]:`, err.message ?? err);
+    console.error(`[Canopy] API error for "${searchTerm}" [${bucket}]:`, err.message ?? err);
     return [];
   }
 }
@@ -268,11 +309,11 @@ export async function refreshExpiringCache({ limit = 100 } = {}) {
       await refreshCacheRow(sb, row);
       refreshed++;
     } catch (err) {
-      console.error(`[Amazon] Refresh error for "${row.search_term}":`, err.message ?? err);
+      console.error(`[Canopy] Refresh error for "${row.search_term}":`, err.message ?? err);
     }
   }
 
-  console.log(`[Amazon] Cache refresh: ${refreshed}/${candidates.size} entries updated in place`);
+  console.log(`[Canopy] Cache refresh: ${refreshed}/${candidates.size} entries updated in place`);
   return refreshed;
 }
 

@@ -21,7 +21,6 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.0.0",
     "@supabase/supabase-js": "^2.105.4",
-    "amazon-creators-api": "^1.2.2",
     "dotenv": "^17.2.4",
     "fastify": "^5.8.5",
     "jose": "^5.10.0",

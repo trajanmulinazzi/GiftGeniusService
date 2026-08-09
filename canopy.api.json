@@ -1,0 +1,46 @@
+{
+  "data": {
+    "amazonProduct": {
+      "title": "string",
+      "subtitle": "string",
+      "brand": "string",
+      "url": "string",
+      "asin": "string",
+      "isPrime": true,
+      "isNew": true,
+      "isInStock": true,
+      "price": {
+        "symbol": "string",
+        "value": 0,
+        "currency": "string",
+        "display": "string"
+      },
+      "mainImageUrl": "string",
+      "imageUrls": ["string"],
+      "rating": 0,
+      "ratingsTotal": 0,
+      "featureBullets": ["string"],
+      "technicalSpecifications": [
+        {
+          "name": "string",
+          "value": "string"
+        }
+      ],
+      "categories": [
+        {
+          "id": "string",
+          "name": "string",
+          "url": "string",
+          "breadcrumbPath": "string"
+        }
+      ],
+      "coupon": {
+        "label": "string"
+      },
+      "seller": {
+        "sellerId": "string",
+        "name": "string"
+      }
+    }
+  }
+}
