@@ -118,6 +118,9 @@ export default async function profileRoutes(fastify) {
         price: snap.price ?? 0,
         image_url: normalizeAmazonImageUrl(snap.image_url ?? ''),
         product_url: snap.product_url ?? '',
+        // Absent on items saved before ratings were snapshotted.
+        rating: snap.rating ?? null,
+        ratings_total: snap.ratings_total ?? null,
         slot_type: row.slot_type,
         hobby_id: row.hobby_id,
         hobby_name: row.hobby_id ? (hobbyNameById.get(row.hobby_id) ?? null) : null,

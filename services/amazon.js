@@ -124,6 +124,11 @@ function mapSearchResult(result) {
     // Canopy search results don't carry a category; keep the historical default
     // so downstream consumers (feed/client) see a consistent field.
     category: 'General',
+    // Null rather than 0 so the client can tell "unrated" from "rated zero".
+    // Cache rows written before this field existed also read as null.
+    rating: typeof result.rating === 'number' ? result.rating : null,
+    ratings_total:
+      typeof result.ratingsTotal === 'number' ? result.ratingsTotal : null,
     fetched_at: new Date().toISOString(),
   };
 }
@@ -188,7 +193,11 @@ async function callCanopyAPI(searchTerm, minPrice, maxPrice) {
 
 function cacheItemsNeedRefresh(items) {
   if (!items?.length) return true;
-  return items.every(i => !i.price || i.price <= 0);
+  if (items.every(i => !i.price || i.price <= 0)) return true;
+  // Rows written before ratings were captured lack the key entirely. Refetch
+  // them once so cards can show stars. An unrated product stores `null`, which
+  // is a present key, so this never loops on genuinely unrated results.
+  return items.every(i => i.rating === undefined);
 }
 
 function cacheExpiresAt() {
