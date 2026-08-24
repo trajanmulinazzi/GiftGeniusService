@@ -75,6 +75,21 @@ CREATE TABLE amazon_cache (
 CREATE INDEX idx_amazon_cache_expires ON amazon_cache(expires_at);
 CREATE INDEX idx_amazon_cache_key ON amazon_cache(cache_key);
 
+-- Whether a product actually suits the hobby whose search surfaced it. Amazon
+-- keyword-matches loosely, so a hobby-specific query returns generic products
+-- that would otherwise be served and labelled as if they were hobby gear.
+CREATE TABLE item_hobby_relevance (
+  item_asin TEXT NOT NULL,
+  hobby_id UUID NOT NULL REFERENCES hobbies(id) ON DELETE CASCADE,
+  affinity REAL NOT NULL CHECK (affinity >= 0 AND affinity <= 1),
+  title TEXT,
+  model TEXT NOT NULL,
+  checked_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (item_asin, hobby_id)
+);
+
+CREATE INDEX idx_item_hobby_relevance_hobby ON item_hobby_relevance(hobby_id);
+
 CREATE TABLE api_call_tracking (
   date_key DATE PRIMARY KEY DEFAULT CURRENT_DATE,
   call_count INT DEFAULT 0

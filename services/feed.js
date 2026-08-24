@@ -9,6 +9,12 @@ import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
 import { isGiftCardItem, isGiftCardSearchTerm, MAX_GIFT_CARDS_PER_BATCH } from './product-filters.js';
+import {
+  classifyUnratedInBackground,
+  isHobbyRejected,
+  isHobbyVerified,
+  loadHobbyRelevance,
+} from './relevance.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
@@ -129,7 +135,19 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     }
   }
 
-  return insertFeedEvents(ctx.sb, sessionId, profileId, feed, ctx.hobbyNames);
+  const events = await insertFeedEvents(
+    ctx.sb, sessionId, profileId, feed, ctx.hobbyNames, ctx.relevance,
+  );
+
+  // After the response is assembled, so the Claude calls never sit in a user's
+  // request. Verdicts are shared across profiles, so this warms the next feed.
+  classifyUnratedInBackground(
+    filtered,
+    new Map((ctx.hobbyNames ?? []).map((h) => [h.id, h.name])),
+    ctx.relevance,
+  );
+
+  return events;
 }
 
 /**
@@ -235,6 +253,8 @@ async function loadFeedContext(sessionId, profileId, occasionOverride) {
     budgetBuckets: resolveBudgetBuckets(profile.budget_min, profile.budget_max),
     hobbyIds,
     hobbyNames,
+    // `${asin}:${hobby_id}` → affinity, filled in as the pool is fetched.
+    relevance: new Map(),
   };
 }
 
@@ -432,7 +452,14 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
         return tagged;
       })
     );
-    for (const items of results) itemPool.push(...items);
+    const fetched = results.flat();
+    itemPool.push(...fetched);
+
+    // Pull verdicts in the same round the items arrive, so the "do we have
+    // enough candidates" check below counts only items we'd actually serve.
+    for (const [key, affinity] of await loadHobbyRelevance(fetched)) {
+      ctx.relevance.set(key, affinity);
+    }
   }
 
   return itemPool;
@@ -441,7 +468,7 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
 // ── Filter + slot fill ────────────────────────────────────
 
 function filterItemPool(itemPool, ctx) {
-  const { profile, recentlyServed, suppressedAsins, suppressedClusters } = ctx;
+  const { profile, recentlyServed, suppressedAsins, suppressedClusters, relevance } = ctx;
   const seen = new Set();
 
   return itemPool.filter(item => {
@@ -450,6 +477,9 @@ function filterItemPool(itemPool, ctx) {
     if (recentlyServed.has(item.asin)) return false;
     if (suppressedAsins.has(item.asin)) return false;
     if (item.hobby_id && item.angle && suppressedClusters.has(`${item.hobby_id}:${item.angle}`)) return false;
+    // Claude has read this product and says it has nothing to do with the hobby
+    // whose search found it. Unrated items stay — they're merely unlabelled.
+    if (item.hobby_id && isHobbyRejected(relevance?.get(`${item.asin}:${item.hobby_id}`))) return false;
     if (item.price > 0 && (item.price < profile.budget_min || item.price > profile.budget_max)) return false;
     return true;
   });
@@ -524,8 +554,13 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
   return feed;
 }
 
-async function insertFeedEvents(sb, sessionId, profileId, feed, hobbyRows = []) {
+async function insertFeedEvents(sb, sessionId, profileId, feed, hobbyRows = [], relevance = new Map()) {
   if (feed.length === 0) return [];
+
+  const verifiedFor = (item) =>
+    item.hobby_id
+      ? isHobbyVerified(relevance.get(`${item.asin}:${item.hobby_id}`))
+      : false;
 
   const hobbyNameById = new Map((hobbyRows ?? []).map((h) => [h.id, h.name]));
 
@@ -558,6 +593,7 @@ async function insertFeedEvents(sb, sessionId, profileId, feed, hobbyRows = []) 
       product_url: item.product_url,
       rating: item.rating ?? null,
       ratings_total: item.ratings_total ?? null,
+      hobby_verified: verifiedFor(item),
     },
     hobby_id: item.hobby_id ?? null,
     angle: item.angle ?? null,
@@ -581,6 +617,9 @@ async function insertFeedEvents(sb, sessionId, profileId, feed, hobbyRows = []) 
     slot_type: item.slot_type,
     hobby_id: item.hobby_id,
     hobby_name: item.hobby_id ? (hobbyNameById.get(item.hobby_id) ?? null) : null,
+    // Whether the product itself supports the hobby label, as opposed to merely
+    // having been found by that hobby's search. Clients label only when true.
+    hobby_verified: verifiedFor(item),
     angle: item.angle,
     score: item.score,
   }));

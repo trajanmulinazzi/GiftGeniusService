@@ -124,6 +124,8 @@ export default async function profileRoutes(fastify) {
         slot_type: row.slot_type,
         hobby_id: row.hobby_id,
         hobby_name: row.hobby_id ? (hobbyNameById.get(row.hobby_id) ?? null) : null,
+        // Items saved before relevance checks existed read as unverified.
+        hobby_verified: snap.hobby_verified === true,
         angle: row.angle,
         saved_at: row.acted_at,
       };

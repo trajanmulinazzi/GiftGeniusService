@@ -1,0 +1,144 @@
+/**
+ * Per-item hobby relevance.
+ *
+ * An item's hobby_id says which hobby's search surfaced it, which is not the
+ * same as the product being for that hobby — Amazon returns generic products
+ * for hobby-specific queries. This module holds Claude's read of the product
+ * itself, so the feed can drop the clearly-unrelated and the client can avoid
+ * labelling an item with a hobby it has nothing to do with.
+ *
+ * Classification runs in the background, never inside a user's request. Until
+ * a verdict exists an item is simply unverified: it still gets served, just
+ * without the hobby label.
+ */
+
+import { getDb } from '../db/index.js';
+import { rateHobbyRelevance, CLAUDE_MODEL } from './claude.js';
+
+/** At or above this, the product is genuinely hobby gear — safe to label. */
+export const MIN_VERIFIED_AFFINITY = 0.6;
+
+/** At or below this, the product is unrelated — keep it out of hobby slots. */
+export const MAX_REJECTED_AFFINITY = 0.3;
+
+/** Bounds the Claude spend a single feed generation can trigger. */
+const MAX_ITEMS_PER_PASS = 60;
+const BATCH_SIZE = 20;
+
+const pairKey = (asin, hobbyId) => `${asin}:${hobbyId}`;
+
+/**
+ * Look up affinities for (asin, hobby_id) pairs.
+ * Returns an empty map on any failure — an unavailable verdict must degrade to
+ * "unverified", never to a broken feed.
+ */
+export async function loadHobbyRelevance(items) {
+  const pairs = items.filter((item) => item.asin && item.hobby_id);
+  if (pairs.length === 0) return new Map();
+
+  const asins = [...new Set(pairs.map((i) => i.asin))];
+  const hobbyIds = [...new Set(pairs.map((i) => i.hobby_id))];
+
+  try {
+    const sb = getDb();
+    const { data, error } = await sb
+      .from('item_hobby_relevance')
+      .select('item_asin, hobby_id, affinity')
+      .in('item_asin', asins)
+      .in('hobby_id', hobbyIds);
+    if (error) throw new Error(error.message);
+
+    const scores = new Map();
+    for (const row of data ?? []) {
+      scores.set(pairKey(row.item_asin, row.hobby_id), row.affinity);
+    }
+    return scores;
+  } catch (err) {
+    console.error('[Relevance] Lookup failed:', err.message ?? err);
+    return new Map();
+  }
+}
+
+/** True when we know the product suits the hobby well enough to say so. */
+export function isHobbyVerified(affinity) {
+  return typeof affinity === 'number' && affinity >= MIN_VERIFIED_AFFINITY;
+}
+
+/** True when we know the product does not belong in that hobby's slot. */
+export function isHobbyRejected(affinity) {
+  return typeof affinity === 'number' && affinity <= MAX_REJECTED_AFFINITY;
+}
+
+function collectUnrated(items, knownScores) {
+  const byHobby = new Map();
+  const seen = new Set();
+  let total = 0;
+
+  for (const item of items) {
+    if (total >= MAX_ITEMS_PER_PASS) break;
+    if (!item.asin || !item.hobby_id || !item.title) continue;
+
+    const key = pairKey(item.asin, item.hobby_id);
+    if (seen.has(key) || knownScores.has(key)) continue;
+    seen.add(key);
+
+    if (!byHobby.has(item.hobby_id)) byHobby.set(item.hobby_id, []);
+    byHobby.get(item.hobby_id).push({ asin: item.asin, title: item.title });
+    total++;
+  }
+
+  return byHobby;
+}
+
+/**
+ * Classify anything in the pool we have no verdict for, after the response has
+ * gone out. The current request gains nothing; the next feed for this hobby
+ * does, and the verdicts are shared across every profile.
+ */
+export function classifyUnratedInBackground(items, hobbyNameById, knownScores) {
+  const byHobby = collectUnrated(items, knownScores);
+  if (byHobby.size === 0) return;
+
+  setImmediate(async () => {
+    const sb = getDb();
+    let written = 0;
+
+    for (const [hobbyId, products] of byHobby) {
+      const hobbyName = hobbyNameById.get(hobbyId);
+      if (!hobbyName) continue;
+
+      for (let i = 0; i < products.length; i += BATCH_SIZE) {
+        const batch = products.slice(i, i + BATCH_SIZE);
+        try {
+          const scores = await rateHobbyRelevance(hobbyName, batch);
+          const rows = batch
+            .filter((p) => scores.has(p.asin))
+            .map((p) => ({
+              item_asin: p.asin,
+              hobby_id: hobbyId,
+              affinity: scores.get(p.asin),
+              title: p.title,
+              model: CLAUDE_MODEL,
+              checked_at: new Date().toISOString(),
+            }));
+          if (rows.length === 0) continue;
+
+          const { error } = await sb
+            .from('item_hobby_relevance')
+            .upsert(rows, { onConflict: 'item_asin,hobby_id' });
+          if (error) throw new Error(error.message);
+          written += rows.length;
+        } catch (err) {
+          console.error(
+            `[Relevance] Classification failed for "${hobbyName}":`,
+            err.message ?? err,
+          );
+        }
+      }
+    }
+
+    if (written > 0) {
+      console.log(`[Relevance] Classified ${written} item/hobby pairs`);
+    }
+  });
+}

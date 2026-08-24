@@ -10,6 +10,7 @@ import { sanitizeSearchTerms } from './product-filters.js';
 const ANGLE_DEFINITIONS = getAngleDefinitions();
 
 const MODEL = 'claude-sonnet-4-6';
+export { MODEL as CLAUDE_MODEL };
 
 const NO_GIFT_CARD_RULES = `
 - NEVER include "gift card", "egift", "e-gift", or "gift certificate" in any query
@@ -90,6 +91,63 @@ ${NO_GIFT_CARD_RULES}
 
   const text = response.content[0].text.trim();
   return sanitizeSearchTerms(parseJsonResponse(text));
+}
+
+/**
+ * Rate how well each product suits a hobby.
+ *
+ * Amazon keyword-matches loosely, so a search written for one hobby routinely
+ * returns generic products ("crossword puzzle lap desk with storage" returns a
+ * plain lap desk). Search provenance therefore can't be trusted as a statement
+ * about the product, and only reading the product itself can tell them apart.
+ *
+ * @param {string} hobbyName
+ * @param {{asin: string, title: string}[]} products
+ * @returns {Promise<Map<string, number>>} asin → affinity in [0, 1]
+ */
+export async function rateHobbyRelevance(hobbyName, products) {
+  if (!products?.length) return new Map();
+
+  const client = getClient();
+  const list = products
+    .map((p, i) => `${i + 1}. [${p.asin}] ${p.title}`)
+    .join('\n');
+
+  const prompt = `Someone is shopping for a gift for a person whose hobby is "${hobbyName}".
+These Amazon products were returned by searches written for that hobby, but Amazon
+matches keywords loosely, so some are generic products that have nothing to do with it.
+
+Rate how well each product suits someone who loves "${hobbyName}":
+- 1.0 — made for this hobby, or a core piece of its gear
+- 0.7 — not hobby-specific, but a keen enthusiast would genuinely use it for it
+- 0.4 — plausible but a stretch; suits the general public equally
+- 0.0 — no meaningful connection to the hobby
+
+Judge the product itself, not the words in its title. A "lap desk" is a 0.0 for
+crossword puzzles even though a crossword search returned it, while "PLA filament"
+is a 1.0 for 3D printing even though the title never says "3D printing".
+
+Products:
+${list}
+
+Return ONLY a JSON object mapping each ASIN to its number, e.g.
+{"B01ABCDEFG": 1.0, "B02HIJKLMN": 0.0}. Include every ASIN listed.`;
+
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const parsed = parseJsonResponse(response.content[0].text.trim());
+  const scores = new Map();
+  for (const { asin } of products) {
+    const value = Number(parsed?.[asin]);
+    if (Number.isFinite(value)) {
+      scores.set(asin, Math.min(Math.max(value, 0), 1));
+    }
+  }
+  return scores;
 }
 
 /**
