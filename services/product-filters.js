@@ -26,3 +26,51 @@ export function isGiftCardSearchTerm(term) {
 export function sanitizeSearchTerms(terms) {
   return (terms ?? []).filter((term) => !isGiftCardSearchTerm(term));
 }
+
+// Marketing / unit words that make Amazon titles look different while naming
+// the same product. Kept small so "steel mixing bowl" and "steel thermos"
+// still count as distinct.
+const TITLE_JUNK = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this',
+  'pack', 'packs', 'set', 'pcs', 'piece', 'pieces',
+  'oz', 'ml', 'mm', 'inch', 'inches',
+  'new', 'pro', 'plus', 'premium', 'bundle',
+  'adults', 'adult', 'kids', 'home', 'use',
+]);
+
+/** Lowercase letters/digits only, collapsed whitespace. */
+export function normalizeProductTitle(title) {
+  return String(title ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function titleTokens(title) {
+  return normalizeProductTitle(title)
+    .split(' ')
+    .filter((w) => w.length > 2 && !TITLE_JUNK.has(w));
+}
+
+/**
+ * True when two listings are the same product sold under different ASINs.
+ * Identical normalized titles always match; otherwise require 3 shared
+ * content tokens covering at least 70% of the shorter title.
+ */
+export function isSameProductListing(a, b) {
+  const titleA = a?.title ?? a;
+  const titleB = b?.title ?? b;
+  const na = normalizeProductTitle(titleA);
+  const nb = normalizeProductTitle(titleB);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+
+  const ta = titleTokens(titleA);
+  const tb = titleTokens(titleB);
+  if (ta.length === 0 || tb.length === 0) return false;
+  const setB = new Set(tb);
+  const shared = ta.filter((t) => setB.has(t)).length;
+  const shorter = Math.min(ta.length, tb.length);
+  return shared >= 3 && shared / shorter >= 0.7;
+}

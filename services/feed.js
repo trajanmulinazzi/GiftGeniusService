@@ -8,7 +8,7 @@ import { getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
-import { isGiftCardItem, isGiftCardSearchTerm, MAX_GIFT_CARDS_PER_BATCH } from './product-filters.js';
+import { isGiftCardItem, isGiftCardSearchTerm, MAX_GIFT_CARDS_PER_BATCH, isSameProductListing, normalizeProductTitle } from './product-filters.js';
 import {
   classifyHobbyRelevance,
   classifyUnratedInBackground,
@@ -209,7 +209,7 @@ async function loadFeedContext(sessionId, profileId, occasionOverride) {
 
   const { data: recentEvents } = await sb
     .from('feed_events')
-    .select('item_asin, signal, served_at')
+    .select('item_asin, item_snapshot, signal, served_at')
     .eq('profile_id', profileId)
     .order('served_at', { ascending: false })
     .limit(500);
@@ -217,20 +217,25 @@ async function loadFeedContext(sessionId, profileId, occasionOverride) {
   const now = Date.now();
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
   const recentlyServed = new Set();
+  const recentlyServedTitles = new Set();
   const asinLastSeen = {};
 
   for (const e of (recentEvents ?? [])) {
     if (!asinLastSeen[e.item_asin]) {
       asinLastSeen[e.item_asin] = (now - new Date(e.served_at).getTime()) / (1000 * 60 * 60 * 24);
     }
+    const titleKey = normalizeProductTitle(e.item_snapshot?.title);
     if (e.signal === 'save' || e.signal === 'shop_now' || e.signal === 'dislike') {
       recentlyServed.add(e.item_asin);
+      if (titleKey) recentlyServedTitles.add(titleKey);
     } else if (e.signal === 'skip') {
       if (now - new Date(e.served_at).getTime() < THIRTY_DAYS_MS) {
         recentlyServed.add(e.item_asin);
+        if (titleKey) recentlyServedTitles.add(titleKey);
       }
     } else {
       recentlyServed.add(e.item_asin);
+      if (titleKey) recentlyServedTitles.add(titleKey);
     }
   }
 
@@ -250,6 +255,7 @@ async function loadFeedContext(sessionId, profileId, occasionOverride) {
     suppressedAsins,
     suppressedClusters,
     recentlyServed,
+    recentlyServedTitles,
     asinLastSeen,
     budgetBuckets: resolveBudgetBuckets(profile.budget_min, profile.budget_max),
     hobbyIds,
@@ -469,19 +475,26 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
 // ── Filter + slot fill ────────────────────────────────────
 
 function filterItemPool(itemPool, ctx) {
-  const { profile, recentlyServed, suppressedAsins, suppressedClusters, relevance } = ctx;
-  const seen = new Set();
+  const { profile, recentlyServed, recentlyServedTitles, suppressedAsins, suppressedClusters, relevance } = ctx;
+  const seenAsins = new Set();
+  const seenTitles = new Set();
+  const kept = [];
 
   return itemPool.filter(item => {
-    if (seen.has(item.asin)) return false;
-    seen.add(item.asin);
+    if (seenAsins.has(item.asin)) return false;
+    const titleKey = normalizeProductTitle(item.title);
+    if (titleKey && seenTitles.has(titleKey)) return false;
     if (recentlyServed.has(item.asin)) return false;
+    if (titleKey && recentlyServedTitles?.has(titleKey)) return false;
     if (suppressedAsins.has(item.asin)) return false;
     if (item.hobby_id && item.angle && suppressedClusters.has(`${item.hobby_id}:${item.angle}`)) return false;
-    // Claude has read this product and says it has nothing to do with the hobby
-    // whose search found it. Unrated items stay — they're merely unlabelled.
     if (item.hobby_id && isHobbyRejected(relevance?.get(`${item.asin}:${item.hobby_id}`))) return false;
     if (item.price > 0 && (item.price < profile.budget_min || item.price > profile.budget_max)) return false;
+    if (kept.some((other) => isSameProductListing(other, item))) return false;
+
+    seenAsins.add(item.asin);
+    if (titleKey) seenTitles.add(titleKey);
+    kept.push(item);
     return true;
   });
 }
@@ -540,6 +553,7 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
       .filter(item => {
         if (usedAsins.has(item.asin) || item.slot_type !== slotType) return false;
         if (giftCardCapReached && isGiftCardItem(item)) return false;
+        if (feed.some((picked) => isSameProductListing(picked, item))) return false;
         return true;
       })
       .map(item => ({
@@ -552,6 +566,7 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
         .filter(item => {
           if (usedAsins.has(item.asin)) return false;
           if (giftCardCapReached && isGiftCardItem(item)) return false;
+          if (feed.some((picked) => isSameProductListing(picked, item))) return false;
           return true;
         })
         .map(item => ({
