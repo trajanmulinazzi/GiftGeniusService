@@ -91,54 +91,68 @@ function collectUnrated(items, knownScores) {
 }
 
 /**
- * Classify anything in the pool we have no verdict for, after the response has
- * gone out. The current request gains nothing; the next feed for this hobby
- * does, and the verdicts are shared across every profile.
+ * Classify items we have no verdict for and persist the scores.
+ * Returns a map of newly written `${asin}:${hobby_id}` → affinity.
+ * Fail-soft: a Claude or DB error leaves those items unrated.
  */
-export function classifyUnratedInBackground(items, hobbyNameById, knownScores) {
+export async function classifyHobbyRelevance(items, hobbyNameById, knownScores = new Map()) {
   const byHobby = collectUnrated(items, knownScores);
-  if (byHobby.size === 0) return;
+  const written = new Map();
+  if (byHobby.size === 0) return written;
 
-  setImmediate(async () => {
-    const sb = getDb();
-    let written = 0;
+  const sb = getDb();
 
-    for (const [hobbyId, products] of byHobby) {
-      const hobbyName = hobbyNameById.get(hobbyId);
-      if (!hobbyName) continue;
+  for (const [hobbyId, products] of byHobby) {
+    const hobbyName = hobbyNameById.get(hobbyId);
+    if (!hobbyName) continue;
 
-      for (let i = 0; i < products.length; i += BATCH_SIZE) {
-        const batch = products.slice(i, i + BATCH_SIZE);
-        try {
-          const scores = await rateHobbyRelevance(hobbyName, batch);
-          const rows = batch
-            .filter((p) => scores.has(p.asin))
-            .map((p) => ({
-              item_asin: p.asin,
-              hobby_id: hobbyId,
-              affinity: scores.get(p.asin),
-              title: p.title,
-              model: CLAUDE_MODEL,
-              checked_at: new Date().toISOString(),
-            }));
-          if (rows.length === 0) continue;
+    for (let i = 0; i < products.length; i += BATCH_SIZE) {
+      const batch = products.slice(i, i + BATCH_SIZE);
+      try {
+        const scores = await rateHobbyRelevance(hobbyName, batch);
+        const rows = batch
+          .filter((p) => scores.has(p.asin))
+          .map((p) => ({
+            item_asin: p.asin,
+            hobby_id: hobbyId,
+            affinity: scores.get(p.asin),
+            title: p.title,
+            model: CLAUDE_MODEL,
+            checked_at: new Date().toISOString(),
+          }));
+        if (rows.length === 0) continue;
 
-          const { error } = await sb
-            .from('item_hobby_relevance')
-            .upsert(rows, { onConflict: 'item_asin,hobby_id' });
-          if (error) throw new Error(error.message);
-          written += rows.length;
-        } catch (err) {
-          console.error(
-            `[Relevance] Classification failed for "${hobbyName}":`,
-            err.message ?? err,
-          );
+        const { error } = await sb
+          .from('item_hobby_relevance')
+          .upsert(rows, { onConflict: 'item_asin,hobby_id' });
+        if (error) throw new Error(error.message);
+
+        for (const row of rows) {
+          written.set(pairKey(row.item_asin, row.hobby_id), row.affinity);
         }
+      } catch (err) {
+        console.error(
+          `[Relevance] Classification failed for "${hobbyName}":`,
+          err.message ?? err,
+        );
       }
     }
+  }
 
-    if (written > 0) {
-      console.log(`[Relevance] Classified ${written} item/hobby pairs`);
-    }
+  if (written.size > 0) {
+    console.log(`[Relevance] Classified ${written.size} item/hobby pairs`);
+  }
+  return written;
+}
+
+/**
+ * Classify the rest of the pool after the response has gone out so later
+ * feeds start with more verdicts already on file.
+ */
+export function classifyUnratedInBackground(items, hobbyNameById, knownScores) {
+  setImmediate(() => {
+    classifyHobbyRelevance(items, hobbyNameById, knownScores).catch((err) => {
+      console.error('[Relevance] Background classification failed:', err.message ?? err);
+    });
   });
 }

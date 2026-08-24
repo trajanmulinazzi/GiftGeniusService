@@ -10,6 +10,7 @@ import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
 import { isGiftCardItem, isGiftCardSearchTerm, MAX_GIFT_CARDS_PER_BATCH } from './product-filters.js';
 import {
+  classifyHobbyRelevance,
   classifyUnratedInBackground,
   isHobbyRejected,
   isHobbyVerified,
@@ -118,13 +119,19 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     });
   }
 
-  const feed = fillFeedSlots(
+  const hobbyNameById = new Map((ctx.hobbyNames ?? []).map((h) => [h.id, h.name]));
+
+  // Score the cards we are about to show *before* insert. Background-only
+  // classification is too late: served ASINs are suppressed, so the user
+  // never sees the hobby chip on an item we only labelled after they left.
+  let feed = fillFeedSlots(
     filtered,
     batchSize,
     ctx.weights,
     ctx.asinLastSeen,
     ctx.profile?.relationship ?? null,
   );
+  feed = await finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById);
 
   for (const item of feed) {
     if (isGiftCardItem(item)) {
@@ -139,13 +146,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     ctx.sb, sessionId, profileId, feed, ctx.hobbyNames, ctx.relevance,
   );
 
-  // After the response is assembled, so the Claude calls never sit in a user's
-  // request. Verdicts are shared across profiles, so this warms the next feed.
-  classifyUnratedInBackground(
-    filtered,
-    new Map((ctx.hobbyNames ?? []).map((h) => [h.id, h.name])),
-    ctx.relevance,
-  );
+  classifyUnratedInBackground(filtered, hobbyNameById, ctx.relevance);
 
   return events;
 }
@@ -485,6 +486,42 @@ function filterItemPool(itemPool, ctx) {
   });
 }
 
+function relevanceKey(item) {
+  return item.hobby_id ? `${item.asin}:${item.hobby_id}` : null;
+}
+
+function isRejectedByRelevance(item, relevance) {
+  const key = relevanceKey(item);
+  return Boolean(key && isHobbyRejected(relevance.get(key)));
+}
+
+/**
+ * Classify the picked cards, drop any that score as unrelated, and refill
+ * once if needed so the returned batch already has hobby_verified set.
+ */
+async function finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById) {
+  const apply = async (items) => {
+    const added = await classifyHobbyRelevance(items, hobbyNameById, ctx.relevance);
+    for (const [key, affinity] of added) ctx.relevance.set(key, affinity);
+  };
+
+  await apply(feed);
+  if (!feed.some((item) => isRejectedByRelevance(item, ctx.relevance))) {
+    return feed;
+  }
+
+  const pool = filtered.filter((item) => !isRejectedByRelevance(item, ctx.relevance));
+  const refilled = fillFeedSlots(
+    pool,
+    batchSize,
+    ctx.weights,
+    ctx.asinLastSeen,
+    ctx.profile?.relationship ?? null,
+  );
+  await apply(refilled);
+  return refilled.filter((item) => !isRejectedByRelevance(item, ctx.relevance));
+}
+
 function canFillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship = null) {
   return fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship).length >= batchSize;
 }
@@ -557,10 +594,12 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
 async function insertFeedEvents(sb, sessionId, profileId, feed, hobbyRows = [], relevance = new Map()) {
   if (feed.length === 0) return [];
 
-  const verifiedFor = (item) =>
-    item.hobby_id
-      ? isHobbyVerified(relevance.get(`${item.asin}:${item.hobby_id}`))
-      : false;
+  const verifiedFor = (item) => {
+    if (!item.hobby_id) return false;
+    const affinity = relevance.get(`${item.asin}:${item.hobby_id}`);
+    if (typeof affinity !== 'number') return null;
+    return isHobbyVerified(affinity);
+  };
 
   const hobbyNameById = new Map((hobbyRows ?? []).map((h) => [h.id, h.name]));
 
