@@ -3,7 +3,7 @@
  */
 
 import { generateFeed } from '../services/feed.js';
-import { processSignal } from '../services/signal.js';
+import { processSignal, clearSignal } from '../services/signal.js';
 import { isProfileExpansionReady } from '../services/precompute.js';
 import { getDb } from '../db/index.js';
 import { signalSchema, validate } from './schemas.js';
@@ -61,6 +61,28 @@ export default async function feedRoutes(fastify) {
     } catch (err) {
       console.error('[Feed] Signal error:', err);
       return sendError(reply, 500, 'We couldn’t save your response. Please try again.');
+    }
+  });
+
+  // DELETE /feed/signal/:feed_event_id — Undo a previously recorded signal
+  // (e.g. un-dislike / un-save from the feed). Reverses the signal's side
+  // effects and clears it so the item reads as un-acted again.
+  fastify.delete('/feed/signal/:feed_event_id', async (request, reply) => {
+    const { feed_event_id } = request.params;
+
+    // Verify ownership via feed_event -> profile -> user (same as POST).
+    const sb = getDb();
+    const { data: event } = await sb.from('feed_events').select('profile_id').eq('id', feed_event_id).single();
+    if (!event) return sendError(reply, 404, 'We couldn’t find that item.');
+    const { data: profile } = await sb.from('profiles').select('user_id').eq('id', event.profile_id).single();
+    if (!profile || profile.user_id !== request.user.id) return sendError(reply, 403, 'You don’t have access to this item.');
+
+    try {
+      const result = await clearSignal(feed_event_id);
+      return result;
+    } catch (err) {
+      console.error('[Feed] Undo signal error:', err);
+      return sendError(reply, 500, 'We couldn’t undo that. Please try again.');
     }
   });
 }

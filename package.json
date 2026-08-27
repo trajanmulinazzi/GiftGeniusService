@@ -12,6 +12,7 @@
     "start:api": "node server.js",
     "console": "npx vite --config test-console/vite.config.js",
     "db:clear": "node scripts/clear-data.js",
+    "cache:clear": "node scripts/clear-cache.js",
     "db:migrate": "node scripts/migrate.js",
     "db:migrate:docker": "docker exec -i giftgenius-postgres psql -U giftgenius -d giftgenius < db/schema.pg.sql"
   },
