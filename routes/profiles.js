@@ -278,4 +278,31 @@ export default async function profileRoutes(fastify) {
     const { data: updated } = await sb.from('profiles').select('*').eq('id', id).single();
     return updated;
   });
+
+  // DELETE /profiles/:id — Permanently delete a recipient profile and its data
+  fastify.delete('/profiles/:id', async (request, reply) => {
+    const sb = getDb();
+    const { id } = request.params;
+
+    const { data: existing } = await sb
+      .from('profiles')
+      .select('user_id')
+      .eq('id', id)
+      .single();
+    if (!existing) return sendError(reply, 404, NOT_FOUND);
+    if (existing.user_id !== request.user.id) return sendError(reply, 403, FORBIDDEN);
+
+    try {
+      // feed_events.profile_id is not ON DELETE CASCADE, so clear it first;
+      // profile_weights, dislike_suppressions, and sessions cascade on their own.
+      await sb.from('feed_events').delete().eq('profile_id', id);
+      const { error } = await sb.from('profiles').delete().eq('id', id);
+      if (error) throw error;
+    } catch (err) {
+      request.log.error(err);
+      return sendError(reply, 500, 'We couldn’t delete this profile. Please try again.');
+    }
+
+    return reply.code(200).send({ ok: true, deleted_id: id });
+  });
 }
