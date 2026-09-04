@@ -34,7 +34,10 @@ const RETRY_BASE_MS = 2000; // exponential backoff: 2s, 4s, 8s
 
 const CANOPY_SEARCH_URL = 'https://rest.canopyapi.co/api/amazon/search';
 const CANOPY_DOMAIN = process.env.CANOPY_DOMAIN ?? 'US';
-const REQUEST_TIMEOUT_MS = 15000;
+// Canopy's search endpoint is often slow (multi-second) under load. A tight cap
+// aborts responses that would otherwise succeed, which just burns the API call
+// and triggers a retry. Keep the ceiling generous and env-tunable.
+const REQUEST_TIMEOUT_MS = Number(process.env.CANOPY_REQUEST_TIMEOUT_MS ?? 30000);
 
 // Max results to keep per search (Canopy returns ~60/page; a slice keeps cache
 // rows small while still giving the feed plenty of candidates per API call).
