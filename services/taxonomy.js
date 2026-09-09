@@ -16,7 +16,10 @@ const TAXONOMY_DIR = join(__dirname, '..', 'taxonomy');
 
 function readLines(filename) {
   const content = readFileSync(join(TAXONOMY_DIR, filename), 'utf-8');
-  return content.split('\n').map(l => l.trim()).filter(Boolean);
+  return content
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
 }
 
 export function loadAngles() {
