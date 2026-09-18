@@ -7,6 +7,12 @@ import { loadAngles } from './taxonomy.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
+/** Matches the interest picker cap in gift-app `HobbyChipPicker`. */
+export const PICKER_MAX_INTERESTS = 8;
+
+/** Weight given to a hobby copied onto a feed that did not already have it. */
+export const COPIED_INTEREST_WEIGHT = 0.1;
+
 /** Weight floor applied to all angles when an interest is removed. */
 export const REMOVAL_WEIGHT = 0.1;
 
@@ -41,6 +47,48 @@ export async function resetInterestWeights(profileId, hobbyId) {
   if (error) {
     throw new Error(`Failed to reset interest weights: ${error.message}`);
   }
+}
+
+/**
+ * Add `hobbyId` to a profile at a low weight when a bookmark is copied over.
+ * No-op if the hobby is already on the profile or the picker cap is full.
+ */
+export async function ensureCopiedInterest(profileId, hobbyId, currentIds) {
+  const sb = getDb();
+  const ids = currentIds ?? [];
+  if (ids.includes(hobbyId)) {
+    return { added: false, alreadyHad: true };
+  }
+  if (ids.length >= PICKER_MAX_INTERESTS) {
+    return { added: false, alreadyHad: false };
+  }
+
+  const weightRows = ALL_ANGLES.map((angle) => ({
+    profile_id: profileId,
+    hobby_id: hobbyId,
+    angle,
+    weight: COPIED_INTEREST_WEIGHT,
+    cooldown_until: null,
+  }));
+  const { error: weightErr } = await sb.from('profile_weights').upsert(weightRows, {
+    onConflict: 'profile_id,hobby_id,angle',
+  });
+  if (weightErr) {
+    throw new Error(`Failed to seed copied interest weights: ${weightErr.message}`);
+  }
+
+  const { error } = await sb
+    .from('profiles')
+    .update({
+      hobby_ids: [...ids, hobbyId],
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', profileId);
+  if (error) {
+    throw new Error(`Failed to add copied interest: ${error.message}`);
+  }
+
+  return { added: true, alreadyHad: false };
 }
 
 /**

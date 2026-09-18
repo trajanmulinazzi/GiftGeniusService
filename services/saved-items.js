@@ -3,6 +3,10 @@
  */
 
 import { getDb } from '../db/index.js';
+import { ensureCopiedInterest } from './profile-interests.js';
+
+/** Same boost as bookmarking the item on its own feed. */
+const EXISTING_HOBBY_BOOST = 0.3;
 
 /**
  * Copy a saved feed_event onto another profile owned by the same user.
@@ -19,7 +23,7 @@ export async function copySavedItem({ sourceProfileId, feedEventId, targetProfil
 
   const { data: profiles, error: profilesErr } = await sb
     .from('profiles')
-    .select('id, user_id')
+    .select('id, user_id, hobby_ids')
     .in('id', [sourceProfileId, targetProfileId]);
 
   if (profilesErr) throw profilesErr;
@@ -65,6 +69,13 @@ export async function copySavedItem({ sourceProfileId, feedEventId, targetProfil
     .maybeSingle();
 
   if (existing) {
+    await applyCopiedItemInterest({
+      sb,
+      targetProfileId,
+      hobbyId: event.hobby_id,
+      angle: event.angle,
+      currentIds: target.hobby_ids ?? [],
+    });
     return { ok: true, already_saved: true, feed_event_id: existing.id };
   }
 
@@ -88,18 +99,36 @@ export async function copySavedItem({ sourceProfileId, feedEventId, targetProfil
 
   if (insertErr) throw insertErr;
 
-  if (event.hobby_id && event.angle) {
-    await sb.rpc('adjust_weight', {
-      p_profile_id: targetProfileId,
-      p_hobby_id: event.hobby_id,
-      p_angle: event.angle,
-      p_delta: 0.3,
-      p_floor: 0.1,
-      p_ceiling: 3.0,
-    });
-  }
+  await applyCopiedItemInterest({
+    sb,
+    targetProfileId,
+    hobbyId: event.hobby_id,
+    angle: event.angle,
+    currentIds: target.hobby_ids ?? [],
+  });
 
   return { ok: true, already_saved: false, feed_event_id: inserted.id };
+}
+
+/**
+ * Adjacent/occasion items have no hobby — copy the gift only.
+ * Missing hobby: add it at 0.1 unless the destination is already at the picker cap.
+ * Existing hobby: boost that cluster the same way a save does.
+ */
+async function applyCopiedItemInterest({ sb, targetProfileId, hobbyId, angle, currentIds }) {
+  if (!hobbyId) return;
+
+  const result = await ensureCopiedInterest(targetProfileId, hobbyId, currentIds);
+  if (!result.alreadyHad || !angle) return;
+
+  await sb.rpc('adjust_weight', {
+    p_profile_id: targetProfileId,
+    p_hobby_id: hobbyId,
+    p_angle: angle,
+    p_delta: EXISTING_HOBBY_BOOST,
+    p_floor: 0.1,
+    p_ceiling: 3.0,
+  });
 }
 
 /**
