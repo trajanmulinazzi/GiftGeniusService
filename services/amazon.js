@@ -176,20 +176,63 @@ function incrementDailyCallCount() {
 }
 
 // ── Rate Limiter (queue-based for concurrent safety) ─────
-let _nextAvailableTime = 0;
 
-async function throttle() {
-  const now = Date.now();
-  const myTurn = Math.max(now, _nextAvailableTime);
-  _nextAvailableTime = myTurn + MIN_REQUEST_INTERVAL_MS;
-  const waitMs = myTurn - now;
+/**
+ * Lower runs first. A user waiting on cards outranks cache warming that exists
+ * to help some later request.
+ */
+export const SEARCH_PRIORITY = { foreground: 0, background: 1 };
+
+let _nextSlotAt = 0;
+let _slotSeq = 0;
+let _slotWaiters = [];
+let _slotTimer = null;
+
+function scheduleSlots() {
+  if (_slotTimer || _slotWaiters.length === 0) return;
+  const wait = Math.max(0, _nextSlotAt - Date.now());
+  _slotTimer = setTimeout(() => {
+    _slotTimer = null;
+    // Ordered when the slot is granted rather than when callers arrive. That's
+    // the whole point: a feed request that shows up behind a queue of background
+    // warming still takes the next slot instead of its arrival position. Priority
+    // is read through a shared box, so a warm search a request has joined is
+    // reordered too.
+    _slotWaiters.sort((a, b) => a.prio.value - b.prio.value || a.seq - b.seq);
+    const next = _slotWaiters.shift();
+    if (next) {
+      _nextSlotAt = Date.now() + MIN_REQUEST_INTERVAL_MS;
+      next.resolve();
+    }
+    scheduleSlots();
+  }, wait);
+}
+
+async function throttle(prio = { value: SEARCH_PRIORITY.foreground }) {
+  const startedAt = Date.now();
+
+  // Nothing queued and the interval has already elapsed — go straight through,
+  // so an uncontended search pays nothing for the scheduler.
+  if (_slotWaiters.length === 0 && startedAt >= _nextSlotAt) {
+    _nextSlotAt = startedAt + MIN_REQUEST_INTERVAL_MS;
+    return 0;
+  }
+
+  await new Promise((resolve) => {
+    _slotWaiters.push({ prio, seq: _slotSeq++, resolve });
+    scheduleSlots();
+  });
+
+  const waitMs = Date.now() - startedAt;
   if (waitMs > 0) {
     // The queue is process-global, so this counter shows how much of a request's
     // latency came from waiting behind other in-flight searches (including
     // background prefetch/refresh work) rather than from Canopy itself.
     count('canopy_throttle_wait_ms', waitMs);
     count('canopy_throttled_calls');
-    await new Promise(r => setTimeout(r, waitMs));
+    if (prio.value === SEARCH_PRIORITY.background) {
+      count('canopy_throttle_wait_ms_background', waitMs);
+    }
   }
   return waitMs;
 }
@@ -225,7 +268,7 @@ function mapSearchResult(result) {
 }
 
 // ── Raw Canopy API Call (with retry + backoff) ───────────
-async function callCanopyAPI(searchTerm, minPrice, maxPrice) {
+async function callCanopyAPI(searchTerm, minPrice, maxPrice, prio) {
   const apiKey = process.env.CANOPY_API_KEY;
   if (!apiKey) throw new Error('CANOPY_API_KEY is not set');
 
@@ -240,7 +283,7 @@ async function callCanopyAPI(searchTerm, minPrice, maxPrice) {
   const url = `${CANOPY_SEARCH_URL}?${params.toString()}`;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const waitedMs = await throttle();
+    const waitedMs = await throttle(prio);
     const startedAt = performance.now();
     try {
       const controller = new AbortController();
@@ -329,7 +372,10 @@ async function writeCacheEntry(sb, { cache_key, search_term, budget_bucket, item
 
 async function refreshCacheRow(sb, row) {
   const [minPrice, maxPrice] = BUCKET_RANGES[row.budget_bucket] ?? [0, 9999];
-  const items = await callCanopyAPI(row.search_term, minPrice, maxPrice);
+  // Maintenance work — always yields the queue to live requests.
+  const items = await callCanopyAPI(row.search_term, minPrice, maxPrice, {
+    value: SEARCH_PRIORITY.background,
+  });
   await sb.from('amazon_cache').update({
     items,
     expires_at: cacheExpiresAt(),
@@ -373,22 +419,31 @@ export function findInflightSearchKeys(entries) {
   return inflight;
 }
 
-export function getItemsForSearchTerm(searchTerm, bucket) {
+export function getItemsForSearchTerm(searchTerm, bucket, priority = SEARCH_PRIORITY.foreground) {
   const key = buildCacheKey(searchTerm, bucket);
 
   const existing = _inflightSearches.get(key);
   if (existing) {
     count('search_coalesced');
-    return existing;
+    // Joining a background warm shouldn't inherit its place in the queue — from
+    // here on someone is waiting on this search, so promote it.
+    if (priority < existing.prio.value) {
+      existing.prio.value = priority;
+      count('search_priority_raised');
+    }
+    return existing.promise;
   }
 
-  const search = resolveItemsForSearchTerm(searchTerm, bucket, key)
+  // Shared with the throttle so the priority can still change after the search
+  // has queued.
+  const prio = { value: priority };
+  const promise = resolveItemsForSearchTerm(searchTerm, bucket, key, prio)
     .finally(() => _inflightSearches.delete(key));
-  _inflightSearches.set(key, search);
-  return search;
+  _inflightSearches.set(key, { promise, prio });
+  return promise;
 }
 
-async function resolveItemsForSearchTerm(searchTerm, bucket, key) {
+async function resolveItemsForSearchTerm(searchTerm, bucket, key, prio) {
   const sb = getDb();
 
   // Check cache
@@ -430,7 +485,7 @@ async function resolveItemsForSearchTerm(searchTerm, bucket, key) {
   // Call Canopy API
   const [minPrice, maxPrice] = BUCKET_RANGES[bucket] ?? [0, 9999];
   try {
-    const items = await callCanopyAPI(searchTerm, minPrice, maxPrice);
+    const items = await callCanopyAPI(searchTerm, minPrice, maxPrice, prio);
     incrementDailyCallCount();
     // Don't make the caller wait on the cache write — the items are already in
     // hand, and a failed write only costs a repeat search later.

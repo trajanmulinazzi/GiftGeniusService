@@ -4,7 +4,13 @@
  */
 
 import { getDb } from '../db/index.js';
-import { findInflightSearchKeys, findWarmCacheKeys, getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
+import {
+  findInflightSearchKeys,
+  findWarmCacheKeys,
+  getItemsForSearchTerm,
+  resolveBudgetBuckets,
+  SEARCH_PRIORITY,
+} from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
@@ -222,7 +228,9 @@ export async function prefetchFeedCache(profileId, occasion) {
       const tasks = [];
       for (const slotType of ['interest', 'adjacent', 'wildcard', 'occasion']) {
         for (const entry of (queues[slotType] ?? []).slice(0, warmPerSlot)) {
-          tasks.push(getItemsForSearchTerm(entry.term, entry.bucket));
+          // Background priority: this exists to help a later request, so it must
+          // never take a queue slot ahead of someone waiting on cards now.
+          tasks.push(getItemsForSearchTerm(entry.term, entry.bucket, SEARCH_PRIORITY.background));
         }
       }
       note('terms_warmed', tasks.length);
