@@ -6,8 +6,9 @@
 import { getDb } from '../db/index.js';
 import {
   findInflightSearchKeys,
-  findWarmCacheKeys,
   getItemsForSearchTerm,
+  loadWarmCacheEntries,
+  recordCacheHitFor,
   resolveBudgetBuckets,
   SEARCH_PRIORITY,
 } from './amazon.js';
@@ -51,9 +52,11 @@ const MAX_FETCH_TERMS = Number(process.env.FEED_MAX_FETCH_TERMS ?? 60);
 const RELEVANCE_BUDGET_MS = Number(process.env.FEED_RELEVANCE_BUDGET_MS ?? 1500);
 
 // How many unrated items one request will pay Claude to classify while it
-// fetches. Caps the spend a single large pool can trigger; the rest is picked up
-// by the background pass after the response.
-const RELEVANCE_FETCH_ITEM_CAP = Number(process.env.FEED_RELEVANCE_FETCH_ITEM_CAP ?? 60);
+// fetches, as a multiple of the batch size. Only the items that can actually be
+// picked need a verdict before the response; rating the whole pool meant 74
+// classifications for a 10-card batch, and the last wave starting too late to
+// hide behind the searches. The rest is picked up by the background pass.
+const RELEVANCE_FETCH_BATCH_MULTIPLE = Number(process.env.FEED_RELEVANCE_FETCH_MULTIPLE ?? 2.5);
 
 /**
  * Round-robin merge per-hobby term lists so no single hobby dominates the fetch
@@ -134,7 +137,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
   });
 
   const queues = await span('buildFetchQueues', () => buildFetchQueues(ctx));
-  await span('orderQueuesCacheFirst', () => orderQueuesCacheFirst(queues));
+  const warmItems = await span('orderQueuesCacheFirst', () => orderQueuesCacheFirst(queues));
   feedLog(ctx, '[Feed] Fetch queue sizes', {
     interest: queues.interest.length,
     adjacent: queues.adjacent.length,
@@ -152,7 +155,7 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
   // here rather than filtering the finished pool a second time.
   const { itemPool, filtered } = await span(
     'fetchItemPool',
-    () => fetchItemPoolIncremental(queues, ctx, batchSize),
+    () => fetchItemPoolIncremental(queues, ctx, batchSize, warmItems),
   );
   note('pool_size', itemPool.length);
   note('pool_after_filters', filtered.length);
@@ -472,14 +475,16 @@ const SLOT_TYPES = ['interest', 'adjacent', 'wildcard', 'occasion'];
  */
 async function orderQueuesCacheFirst(queues) {
   const entries = SLOT_TYPES.flatMap((slot) => queues[slot] ?? []);
-  if (entries.length === 0) return;
+  if (entries.length === 0) return new Map();
 
-  const cached = await findWarmCacheKeys(entries);
+  // This read doubles as the fetch of every warm term's items, so the loop below
+  // can serve them from memory instead of one point lookup per term.
+  const cached = await loadWarmCacheEntries(entries);
   const inflight = findInflightSearchKeys(entries);
   note('warm_terms', cached.size);
   note('inflight_terms', inflight.size);
   note('total_terms', entries.length);
-  if (cached.size === 0 && inflight.size === 0) return;
+  if (cached.size === 0 && inflight.size === 0) return cached;
 
   const isWarm = (entry) => {
     const key = `${entry.term}::${entry.bucket}`;
@@ -489,6 +494,7 @@ async function orderQueuesCacheFirst(queues) {
     const queue = queues[slot] ?? [];
     queues[slot] = [...queue.filter(isWarm), ...queue.filter((e) => !isWarm(e))];
   }
+  return cached;
 }
 
 /** How many slots of each type a batch of this size needs. */
@@ -555,7 +561,7 @@ function hasEnoughCandidates(filtered, batchSize, canStillCover = () => false) {
  * enough candidates — searches already in flight are allowed to land, since
  * their cost is sunk and their items are still useful.
  */
-async function fetchItemPoolIncremental(queues, ctx, batchSize) {
+async function fetchItemPoolIncremental(queues, ctx, batchSize, warmItems = new Map()) {
   const itemPool = [];
   const cursors = { interest: 0, adjacent: 0, wildcard: 0, occasion: 0 };
   const inflight = { interest: 0, adjacent: 0, wildcard: 0, occasion: 0 };
@@ -588,14 +594,18 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
   const classifying = new Set();
   let classifyingItems = 0;
 
+  const classifyBudget = Math.ceil(batchSize * RELEVANCE_FETCH_BATCH_MULTIPLE);
+
   const classifyNewItems = (items) => {
-    // Bounded so a large pool can't multiply Claude spend. Anything past the cap
-    // is left to the background pass after the response.
-    if (classifyingItems >= RELEVANCE_FETCH_ITEM_CAP) return;
-    const unrated = items.filter((item) => (
-      item.asin && item.hobby_id && item.title
-      && !ctx.relevance.has(`${item.asin}:${item.hobby_id}`)
-    ));
+    const remaining = classifyBudget - classifyingItems;
+    if (remaining <= 0) return;
+    const unrated = items
+      .filter((item) => (
+        item.asin && item.hobby_id && item.title
+        && !ctx.relevance.has(`${item.asin}:${item.hobby_id}`)
+      ))
+      // Trimmed to the remaining budget rather than letting a wave overshoot it.
+      .slice(0, remaining);
     if (unrated.length === 0) return;
     classifyingItems += unrated.length;
 
@@ -666,7 +676,13 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
       inflight[meta.slot_type] = (inflight[meta.slot_type] ?? 0) + 1;
 
       try {
-        const items = await getItemsForSearchTerm(term, bucket);
+        // Already read as part of the warm-cache pass, so no lookup needed.
+        const preloaded = warmItems.get(`${term}::${bucket}`);
+        if (preloaded) {
+          count('cache_preloaded');
+          recordCacheHitFor(term, bucket);
+        }
+        const items = preloaded ?? await getItemsForSearchTerm(term, bucket);
         const tagged = items.map((item) => ({ ...item, ...meta, source_term: term }));
 
         const giftCards = tagged.filter(isGiftCardItem);

@@ -78,17 +78,22 @@ export function buildCacheKey(searchTerm, bucket) {
 }
 
 /**
- * Which of these (term, bucket) pairs are already cached and unexpired.
+ * Read every warm entry for these (term, bucket) pairs in one pass.
  *
- * Lets the feed spend its cached searches (~200ms) before any live one (~6s),
- * in one round trip for the whole queue. A row can still turn out stale by
- * content, so this is a strong hint rather than a guarantee.
+ * This is the same round trip the caller already needed to order its queue, so
+ * returning the items costs nothing extra — and it means a warm term is served
+ * from memory instead of its own point lookup. Twelve of those lookups ran
+ * ~350ms each from Render against Supabase, which was most of a warm batch.
+ *
+ * Entries whose cached items are too thin to use are left out, so they fall
+ * through to the normal path and get refetched.
  *
  * @param {{term: string, bucket: string}[]} entries
- * @returns {Promise<Set<string>>} `${term}::${bucket}` for each warm entry
+ * @returns {Promise<Map<string, object[]>>} `${term}::${bucket}` → cached items
  */
-export async function findWarmCacheKeys(entries) {
-  if (!entries?.length) return new Set();
+export async function loadWarmCacheEntries(entries) {
+  const warm = new Map();
+  if (!entries?.length) return warm;
 
   const sb = getDb();
   const byKey = new Map();
@@ -97,14 +102,13 @@ export async function findWarmCacheKeys(entries) {
   }
 
   const keys = [...byKey.keys()];
-  const warm = new Set();
   const now = new Date().toISOString();
 
   // Chunked: a few hundred keys in one `in` filter overruns the request URL.
   for (let i = 0; i < keys.length; i += 150) {
     const { data, error } = await sb
       .from('amazon_cache')
-      .select('cache_key')
+      .select('cache_key, items')
       .in('cache_key', keys.slice(i, i + 150))
       .gt('expires_at', now);
     if (error) {
@@ -113,11 +117,52 @@ export async function findWarmCacheKeys(entries) {
     }
     for (const row of data ?? []) {
       const entry = byKey.get(row.cache_key);
-      if (entry) warm.add(entry);
+      if (!entry) continue;
+      const items = row.items ?? [];
+      if (cacheItemsNeedRefresh(items)) continue;
+      // No hit recorded here: this reads the whole queue, most of which the
+      // caller never gets to. hit_count orders cache refreshes, so it has to mean
+      // "served", not "considered".
+      warm.set(entry, items.map((item) => ({
+        ...item,
+        image_url: normalizeAmazonImageUrl(item.image_url),
+      })));
     }
   }
 
   return warm;
+}
+
+// ── Cache hit bookkeeping ─────────────────────────────────
+// hit_count only orders which entries refreshExpiringCache renews first, so it
+// doesn't need to be written while someone is waiting on cards. A batch of warm
+// terms used to fire nine to eleven separate RPCs inside the request, each
+// competing with the queries that actually matter. They're collected here and
+// flushed once the request has had its turn.
+const _pendingCacheHits = new Set();
+let _cacheHitFlush = null;
+const CACHE_HIT_FLUSH_MS = Number(process.env.CANOPY_CACHE_HIT_FLUSH_MS ?? 2000);
+
+/** Record a hit for a preloaded entry, at the point it's actually served. */
+export function recordCacheHitFor(searchTerm, bucket) {
+  recordCacheHit(buildCacheKey(searchTerm, bucket));
+}
+
+function recordCacheHit(cacheKey) {
+  count('cache_hits');
+  _pendingCacheHits.add(cacheKey);
+  if (_cacheHitFlush) return;
+  _cacheHitFlush = setTimeout(() => {
+    _cacheHitFlush = null;
+    const keys = [..._pendingCacheHits];
+    _pendingCacheHits.clear();
+    const sb = getDb();
+    for (const key of keys) {
+      sb.rpc('increment_cache_hit', { p_cache_key: key }).then(undefined, () => {});
+    }
+  }, CACHE_HIT_FLUSH_MS);
+  // Never hold the process open for a counter.
+  _cacheHitFlush.unref?.();
 }
 
 // ── Daily API Call Tracking ───────────────────────────────
@@ -457,11 +502,7 @@ async function resolveItemsForSearchTerm(searchTerm, bucket, key, prio) {
   if (cached) {
     const items = cached.items ?? [];
     if (!cacheItemsNeedRefresh(items)) {
-      // `.then()` matters: a Supabase builder never sends its request until it's
-      // subscribed to, so the previous bare call left hit_count permanently 0 —
-      // which also made refreshExpiringCache's hit_count ordering meaningless.
-      sb.rpc('increment_cache_hit', { p_cache_key: key }).then(undefined, () => {});
-      count('cache_hits');
+      recordCacheHit(key);
       return items.map(item => ({
         ...item,
         image_url: normalizeAmazonImageUrl(item.image_url),
