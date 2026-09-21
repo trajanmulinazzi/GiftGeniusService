@@ -4,7 +4,7 @@
  */
 
 import { getDb } from '../db/index.js';
-import { findWarmCacheKeys, getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
+import { findInflightSearchKeys, findWarmCacheKeys, getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
@@ -197,35 +197,35 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
 }
 
 /**
- * Warm a subset of cache keys in the background after session start.
- * Fire-and-forget — does not block the HTTP response.
+ * Warm a subset of cache keys for a profile's next batch.
+ *
+ * Safe to call without awaiting — it never rejects — but it does resolve, so a
+ * caller that needs to warm again after new terms appear can sequence itself.
  */
-export function prefetchFeedCache(profileId, occasion) {
-  setImmediate(async () => {
-    try {
-      // Traced separately: this runs after the session response has gone out, so
-      // its cost shows up to the user as polling time, not request time.
-      await runDetached('feed.prefetch', { profile_id: profileId, occasion }, async () => {
-        const ctx = await span('loadFeedContext', () => loadFeedContext(null, profileId, occasion));
-        const queues = await span('buildFetchQueues', () => buildFetchQueues(ctx));
-        // Warm roughly what a first batch consumes rather than a token couple of
-        // terms. This runs while the client is polling a preparing feed, so time
-        // spent here is time the user was already going to wait — and it turns
-        // their first real request from ~13 live searches into mostly hits.
-        const warmPerSlot = Number(process.env.FEED_PREFETCH_PER_SLOT ?? 4);
-        const tasks = [];
-        for (const slotType of ['interest', 'adjacent', 'wildcard', 'occasion']) {
-          for (const entry of (queues[slotType] ?? []).slice(0, warmPerSlot)) {
-            tasks.push(getItemsForSearchTerm(entry.term, entry.bucket));
-          }
+export async function prefetchFeedCache(profileId, occasion) {
+  try {
+    // Traced separately: this runs outside any request, so its cost shows up to
+    // the user as polling time, not request time.
+    await runDetached('feed.prefetch', { profile_id: profileId, occasion }, async () => {
+      const ctx = await span('loadFeedContext', () => loadFeedContext(null, profileId, occasion));
+      const queues = await span('buildFetchQueues', () => buildFetchQueues(ctx));
+      // Warm roughly what a first batch consumes rather than a token couple of
+      // terms. This runs while the client is polling a preparing feed, so time
+      // spent here is time the user was already going to wait — and it turns
+      // their first real request from ~13 live searches into mostly hits.
+      const warmPerSlot = Number(process.env.FEED_PREFETCH_PER_SLOT ?? 4);
+      const tasks = [];
+      for (const slotType of ['interest', 'adjacent', 'wildcard', 'occasion']) {
+        for (const entry of (queues[slotType] ?? []).slice(0, warmPerSlot)) {
+          tasks.push(getItemsForSearchTerm(entry.term, entry.bucket));
         }
-        note('terms_warmed', tasks.length);
-        await span('warmCache', () => Promise.all(tasks), { terms: tasks.length });
-      }, reportTrace);
-    } catch (err) {
-      console.error('[Feed] Prefetch error:', err.message);
-    }
-  });
+      }
+      note('terms_warmed', tasks.length);
+      await span('warmCache', () => Promise.all(tasks), { terms: tasks.length });
+    }, reportTrace);
+  } catch (err) {
+    console.error('[Feed] Prefetch error:', err.message);
+  }
 }
 
 // ── Context loading ───────────────────────────────────────
@@ -451,24 +451,31 @@ const SLOT_TYPES = ['interest', 'adjacent', 'wildcard', 'occasion'];
  * ordering by warmth is the difference between filling a batch from cache and
  * paying Canopy for it. Relative order within the warm and cold groups is kept,
  * which preserves the per-hobby interleaving built above.
+ *
+ * Searches the background prefetch already has running count as warm too. They
+ * aren't cached yet — the row only lands when the search finishes — so without
+ * this a request arriving mid-prefetch would pass over the very terms being
+ * fetched for it and start its own live calls alongside them.
  */
 async function orderQueuesCacheFirst(queues) {
   const entries = SLOT_TYPES.flatMap((slot) => queues[slot] ?? []);
   if (entries.length === 0) return;
 
-  const warm = await findWarmCacheKeys(entries);
-  if (warm.size === 0) {
-    note('warm_terms', 0);
-    return;
-  }
+  const cached = await findWarmCacheKeys(entries);
+  const inflight = findInflightSearchKeys(entries);
+  note('warm_terms', cached.size);
+  note('inflight_terms', inflight.size);
+  note('total_terms', entries.length);
+  if (cached.size === 0 && inflight.size === 0) return;
 
-  const isWarm = (entry) => warm.has(`${entry.term}::${entry.bucket}`);
+  const isWarm = (entry) => {
+    const key = `${entry.term}::${entry.bucket}`;
+    return cached.has(key) || inflight.has(key);
+  };
   for (const slot of SLOT_TYPES) {
     const queue = queues[slot] ?? [];
     queues[slot] = [...queue.filter(isWarm), ...queue.filter((e) => !isWarm(e))];
   }
-  note('warm_terms', warm.size);
-  note('total_terms', entries.length);
 }
 
 /** How many slots of each type a batch of this size needs. */

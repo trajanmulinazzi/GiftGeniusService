@@ -7,7 +7,8 @@ import { getDb } from '../db/index.js';
 import { expandHobbyAngle, expandOccasion } from './claude.js';
 import { resolveBudgetBuckets } from './amazon.js';
 import { loadAngles, loadOccasions, loadBudgetBuckets } from './taxonomy.js';
-import { note, span } from './diag.js';
+import { prefetchFeedCache } from './feed.js';
+import { note, reportTrace, runDetached, span } from './diag.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 const ALL_OCCASIONS = loadOccasions();
@@ -146,6 +147,50 @@ async function loadProfileExpansionTargets(sb, profileId, occasion) {
   }
   const buckets = resolveBudgetBuckets(profile.budget_min, profile.budget_max);
   return { profile, hobbies, buckets };
+}
+
+// Keyed by profile+occasion so the profile-create and session-create calls
+// don't each pay for a round of Canopy searches.
+const _warmingProfiles = new Set();
+
+/**
+ * Get a profile's feed ready in the background: warm the Amazon cache for the
+ * terms its first batch will use, and compute any expansions it's missing.
+ *
+ * Warming starts immediately rather than after expansion prep finishes. A live
+ * Canopy search takes ~8s, so a warm that only begins once the client is already
+ * asking for its feed has no chance to help that request — and a profile
+ * normally has usable terms before prep adds any. Prep runs alongside, and
+ * whatever it adds gets a second warming pass.
+ *
+ * Fire-and-forget: returns immediately and never rejects.
+ */
+export function warmProfileFeed(profileId, occasion, meta = {}) {
+  const key = `${profileId}:${occasion}`;
+  if (_warmingProfiles.has(key)) return;
+  _warmingProfiles.add(key);
+
+  setImmediate(async () => {
+    try {
+      const warmed = prefetchFeedCache(profileId, occasion);
+      const prepared = runDetached(
+        'profile.prepareExpansions',
+        { profile_id: profileId, occasion, ...meta },
+        () => prepareProfileExpansions(profileId, occasion),
+        reportTrace,
+      ).catch((err) => {
+        console.error('[Precompute] Expansion prep error:', err.message ?? err);
+        return null;
+      });
+
+      const [, result] = await Promise.all([warmed, prepared]);
+      // Only worth a second pass if prep actually produced terms the first pass
+      // couldn't have seen.
+      if (result?.completed > 0) await prefetchFeedCache(profileId, occasion);
+    } finally {
+      _warmingProfiles.delete(key);
+    }
+  });
 }
 
 /**

@@ -4,10 +4,8 @@
 
 import { getDb } from '../db/index.js';
 import { createSessionSchema, validate } from './schemas.js';
-import { prefetchFeedCache } from '../services/feed.js';
-import { prepareProfileExpansions } from '../services/precompute.js';
+import { warmProfileFeed } from '../services/precompute.js';
 import { sendError } from './errors.js';
-import { reportTrace, runDetached } from '../services/diag.js';
 
 export default async function sessionRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate);
@@ -40,21 +38,12 @@ export default async function sessionRoutes(fastify) {
 
     if (error) return sendError(reply, 400, 'We couldn’t start a session. Please try again.');
 
-    // Fire-and-forget: compute any missing expansions for this profile (lazy,
-    // on first use), then warm the Amazon cache. Both run in the background so
-    // the response is immediate; the app polls the feed while `preparing`.
-    // Traced on its own: the app can't show cards until this finishes, so its
-    // duration is the floor on "time to first card" for a brand-new feed.
-    setImmediate(() => {
-      runDetached(
-        'session.prepareExpansions',
-        { profile_id, occasion: effectiveOccasion, session_id: data.id },
-        () => prepareProfileExpansions(profile_id, effectiveOccasion),
-        reportTrace,
-      )
-        .catch(err => console.error('[Session] Expansion prep error:', err.message))
-        .finally(() => prefetchFeedCache(profile_id, effectiveOccasion));
-    });
+    // Fire-and-forget: warm the cache and compute any missing expansions for
+    // this profile. Both run in the background so the response is immediate; the
+    // app polls the feed while `preparing`. Deduped against the warm that
+    // profile creation already started, which is usually the one that matters —
+    // by here the client is moments away from asking for its feed.
+    warmProfileFeed(profile_id, effectiveOccasion, { session_id: data.id });
 
     return reply.code(201).send(data);
   });

@@ -5,6 +5,7 @@
 import { getDb } from '../db/index.js';
 import { normalizeAmazonImageUrl } from '../services/amazon.js';
 import { loadAngles } from '../services/taxonomy.js';
+import { warmProfileFeed } from '../services/precompute.js';
 import {
   removeInterestFromProfile,
   syncHobbyChanges,
@@ -58,6 +59,12 @@ export default async function profileRoutes(fastify) {
         ignoreDuplicates: true,
       });
     }
+
+    // Start warming here rather than waiting for the first session. The client
+    // still has to finish the create flow and navigate before it asks for a
+    // feed, and a live Canopy search takes ~8s — that head start is the
+    // difference between the first batch joining a search and starting one.
+    warmProfileFeed(profile.id, profile.occasion ?? 'just_because');
 
     return reply.code(201).send(profile);
   });

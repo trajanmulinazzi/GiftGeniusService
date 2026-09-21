@@ -353,6 +353,26 @@ async function refreshCacheRow(sb, row) {
  */
 const _inflightSearches = new Map();
 
+/**
+ * Which of these (term, bucket) pairs already have a search running.
+ *
+ * Joining one of these costs only its remaining time, so to a caller choosing
+ * what to search next they rank alongside a cache hit — and ahead of any term
+ * that would start a new live call. Nothing is awaited here.
+ *
+ * @param {{term: string, bucket: string}[]} entries
+ * @returns {Set<string>} `${term}::${bucket}` for each entry already in flight
+ */
+export function findInflightSearchKeys(entries) {
+  const inflight = new Set();
+  for (const { term, bucket } of entries ?? []) {
+    if (_inflightSearches.has(buildCacheKey(term, bucket))) {
+      inflight.add(`${term}::${bucket}`);
+    }
+  }
+  return inflight;
+}
+
 export function getItemsForSearchTerm(searchTerm, bucket) {
   const key = buildCacheKey(searchTerm, bucket);
 
