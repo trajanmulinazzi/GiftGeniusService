@@ -6,6 +6,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAngleDefinitions } from './taxonomy.js';
 import { sanitizeSearchTerms } from './product-filters.js';
+import { count, record } from './diag.js';
 
 const ANGLE_DEFINITIONS = getAngleDefinitions();
 
@@ -32,11 +33,37 @@ function parseJsonResponse(text) {
 }
 
 /**
+ * Single timed entry point for every Claude call, so a trace can attribute
+ * latency to the specific purpose (relevance rating on the feed path costs very
+ * differently from a one-off precompute expansion).
+ */
+async function callClaude(purpose, params, meta = {}) {
+  const client = getClient();
+  const startedAt = performance.now();
+  try {
+    const response = await client.messages.create(params);
+    record('claude', purpose, performance.now() - startedAt, {
+      ...meta,
+      out_tokens: response.usage?.output_tokens,
+    });
+    count('claude_calls');
+    return response;
+  } catch (err) {
+    record('claude', purpose, performance.now() - startedAt, {
+      ...meta,
+      failed: err?.status ?? err?.name ?? 'error',
+    });
+    count('claude_calls');
+    count('claude_failures');
+    throw err;
+  }
+}
+
+/**
  * Generate search terms for a hobby × angle pair.
  * Returns string[] of 6-8 Amazon search queries.
  */
 export async function expandHobbyAngle(hobbyName, angle) {
-  const client = getClient();
   const prompt = `You are generating Amazon product search terms for a gift recommendation app.
 
 Hobby: ${hobbyName}
@@ -56,11 +83,11 @@ ${NO_GIFT_CARD_RULES}
 
 Example output: ["japanese chef knife set","mandoline slicer with safety guard","cast iron spice grinder"]`;
 
-  const response = await client.messages.create({
+  const response = await callClaude('expandHobbyAngle', {
     model: MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }, { hobby: hobbyName, angle });
 
   const text = response.content[0].text.trim();
   return sanitizeSearchTerms(parseJsonResponse(text));
@@ -71,7 +98,6 @@ Example output: ["japanese chef knife set","mandoline slicer with safety guard",
  * Returns string[] of 6-8 search queries.
  */
 export async function expandOccasion(occasion, budgetBucket) {
-  const client = getClient();
   const prompt = `Generate 6-8 Amazon search terms for occasion-specific gift discovery.
 These should NOT be hobby-dependent — they are universal gift ideas for this occasion.
 
@@ -83,11 +109,11 @@ ${NO_GIFT_CARD_RULES}
 - Prefer physical products someone would wrap and give
 - Return ONLY a JSON array of strings.`;
 
-  const response = await client.messages.create({
+  const response = await callClaude('expandOccasion', {
     model: MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }, { occasion, bucket: budgetBucket });
 
   const text = response.content[0].text.trim();
   return sanitizeSearchTerms(parseJsonResponse(text));
@@ -108,7 +134,6 @@ ${NO_GIFT_CARD_RULES}
 export async function rateHobbyRelevance(hobbyName, products) {
   if (!products?.length) return new Map();
 
-  const client = getClient();
   const list = products
     .map((p, i) => `${i + 1}. [${p.asin}] ${p.title}`)
     .join('\n');
@@ -133,11 +158,11 @@ ${list}
 Return ONLY a JSON object mapping each ASIN to its number, e.g.
 {"B01ABCDEFG": 1.0, "B02HIJKLMN": 0.0}. Include every ASIN listed.`;
 
-  const response = await client.messages.create({
+  const response = await callClaude('rateHobbyRelevance', {
     model: MODEL,
     max_tokens: 2048,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }, { hobby: hobbyName, products: products.length });
 
   const parsed = parseJsonResponse(response.content[0].text.trim());
   const scores = new Map();
@@ -155,7 +180,6 @@ Return ONLY a JSON object mapping each ASIN to its number, e.g.
  * Returns string[] of 6-8 search queries at the intersection of multiple hobbies.
  */
 export async function expandCrossHobby(hobbyNames) {
-  const client = getClient();
   const prompt = `A person has the following hobbies: ${hobbyNames.join(', ')}.
 Generate 6-8 Amazon search terms for gifts that combine or sit at the intersection of these hobbies.
 These should be non-obvious — items they wouldn't find just searching for one hobby alone.
@@ -164,11 +188,11 @@ Rules:
 ${NO_GIFT_CARD_RULES}
 - Return ONLY a JSON array of strings.`;
 
-  const response = await client.messages.create({
+  const response = await callClaude('expandCrossHobby', {
     model: MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }, { hobbies: hobbyNames.length });
 
   const text = response.content[0].text.trim();
   return sanitizeSearchTerms(parseJsonResponse(text));

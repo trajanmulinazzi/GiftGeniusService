@@ -7,6 +7,7 @@ import { getDb } from '../db/index.js';
 import { expandHobbyAngle, expandOccasion } from './claude.js';
 import { resolveBudgetBuckets } from './amazon.js';
 import { loadAngles, loadOccasions, loadBudgetBuckets } from './taxonomy.js';
+import { note, span } from './diag.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 const ALL_OCCASIONS = loadOccasions();
@@ -154,7 +155,10 @@ async function loadProfileExpansionTargets(sb, profileId, occasion) {
  */
 export async function prepareProfileExpansions(profileId, occasion) {
   const sb = getDb();
-  const { profile, hobbies, buckets } = await loadProfileExpansionTargets(sb, profileId, occasion);
+  const { profile, hobbies, buckets } = await span(
+    'loadExpansionTargets',
+    () => loadProfileExpansionTargets(sb, profileId, occasion),
+  );
   if (!profile) return null;
 
   const tasks = [];
@@ -203,10 +207,15 @@ export async function prepareProfileExpansions(profileId, occasion) {
     });
   }
 
+  note('expansions_missing', tasks.length);
   if (tasks.length === 0) return { completed: 0, errors: 0 };
 
   console.log(`[Precompute] Preparing profile ${profileId}: ${tasks.length} expansions...`);
-  const result = await runBatched(tasks, BATCH_SIZE, BATCH_DELAY_MS);
+  const result = await span(
+    'runExpansions',
+    () => runBatched(tasks, BATCH_SIZE, BATCH_DELAY_MS),
+    { tasks: tasks.length, batch_size: BATCH_SIZE, batch_delay_ms: BATCH_DELAY_MS },
+  );
   console.log(`[Precompute] Profile ${profileId} ready: ${result.completed} computed, ${result.errors} errors`);
   return result;
 }

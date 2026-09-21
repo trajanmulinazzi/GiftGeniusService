@@ -8,6 +8,13 @@ import { isProfileExpansionReady } from '../services/precompute.js';
 import { getDb } from '../db/index.js';
 import { signalSchema, validate } from './schemas.js';
 import { sendError } from './errors.js';
+import {
+  DIAG_ENABLED,
+  reportTrace,
+  runWithDiag,
+  span,
+  summarizeTrace,
+} from '../services/diag.js';
 
 export default async function feedRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate);
@@ -24,17 +31,37 @@ export default async function feedRoutes(fastify) {
     if (session.profiles.user_id !== request.user.id) return sendError(reply, 403, 'You don’t have access to this feed.');
 
     try {
-      const items = await generateFeed(session_id, session.profile_id, batch, {
-        log: request.log,
-      });
-      // Empty is a valid (not error) state — the profile's expansions may still
-      // be computing. `preparing` tells the app to keep polling vs. give up.
-      const preparing = items.length === 0
-        ? !(await isProfileExpansionReady(session.profile_id, session.occasion))
-        : false;
-      return { items, count: items.length, preparing };
+      const { result, trace } = await runWithDiag(
+        'feed.generate',
+        { session_id, profile_id: session.profile_id, batch },
+        async () => {
+          const items = await generateFeed(session_id, session.profile_id, batch, {
+            log: request.log,
+          });
+          // Empty is a valid (not error) state — the profile's expansions may still
+          // be computing. `preparing` tells the app to keep polling vs. give up.
+          const preparing = items.length === 0
+            ? !(await span(
+              'isProfileExpansionReady',
+              () => isProfileExpansionReady(session.profile_id, session.occasion),
+            ))
+            : false;
+          return { items, preparing };
+        },
+      );
+
+      reportTrace(trace);
+      return {
+        items: result.items,
+        count: result.items.length,
+        preparing: result.preparing,
+        // Lets the client log server-side timings next to its own, so network
+        // time is visible as the gap between the two.
+        ...(DIAG_ENABLED ? { diag: summarizeTrace(trace) } : {}),
+      };
     } catch (err) {
       request.log.error({ err }, '[Feed] Generation error');
+      reportTrace(err?.diagTrace);
       return sendError(
         reply,
         503,

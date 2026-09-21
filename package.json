@@ -11,6 +11,7 @@
     "start": "node index.js",
     "start:api": "node server.js",
     "console": "npx vite --config test-console/vite.config.js",
+    "diag:feed": "node scripts/diag-feed.js",
     "db:clear": "node scripts/clear-data.js",
     "cache:clear": "node scripts/clear-cache.js",
     "db:migrate": "node scripts/migrate.js",

@@ -19,6 +19,7 @@ import {
   resolveBackendUser,
   isClerkConfigured,
 } from './services/clerk-auth.js';
+import { DIAG_ENABLED } from './services/diag.js';
 import authRoutes from './routes/auth.js';
 import profileRoutes from './routes/profiles.js';
 import hobbyRoutes from './routes/hobbies.js';
@@ -33,6 +34,22 @@ const fastify = Fastify({ logger: true });
 
 // CORS
 await fastify.register(fastifyCors, { origin: true });
+
+// Wall-clock per request, including auth and serialization. A feed trace only
+// covers generation, so the gap between this and the trace total is overhead
+// (token verification, JSON encoding of the batch, etc.).
+if (DIAG_ENABLED) {
+  fastify.addHook('onRequest', async (request) => {
+    request.diagStartedAt = performance.now();
+  });
+  fastify.addHook('onResponse', async (request, reply) => {
+    const totalMs = performance.now() - (request.diagStartedAt ?? performance.now());
+    console.log(
+      `[Timing] ${request.method} ${request.url} → ${reply.statusCode} ` +
+      `${Math.round(totalMs)}ms (auth ${Math.round(request.diagAuthMs ?? 0)}ms)`,
+    );
+  });
+}
 
 if (!isClerkConfigured()) {
   fastify.log.warn(
@@ -58,6 +75,7 @@ fastify.decorate('authenticate', async function (request, reply) {
   }
   const token = header.slice(7).trim();
 
+  const authStartedAt = performance.now();
   try {
     const payload = await verifyClerkToken(token);
     const user = await resolveBackendUser(payload.sub, {
@@ -66,7 +84,9 @@ fastify.decorate('authenticate', async function (request, reply) {
     });
     request.user = { id: user.id, clerkId: payload.sub, email: user.email, name: user.name };
     request.clerkPayload = payload;
+    request.diagAuthMs = performance.now() - authStartedAt;
   } catch (err) {
+    request.diagAuthMs = performance.now() - authStartedAt;
     request.log.warn({ err: err.message }, 'Clerk auth failed');
     return sendError(reply, 401, 'Your session has expired. Please sign in again.');
   }
