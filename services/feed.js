@@ -137,11 +137,12 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     occasion: queues.occasion.length,
   });
 
-  const itemPool = await span(
+  // The fetch loop already filters the pool as it grows, so its result is reused
+  // here rather than filtering the finished pool a second time.
+  const { itemPool, filtered } = await span(
     'fetchItemPool',
     () => fetchItemPoolIncremental(queues, ctx, batchSize),
   );
-  const filtered = syncSpan('filterItemPool', () => filterItemPool(itemPool, ctx));
   note('pool_size', itemPool.length);
   note('pool_after_filters', filtered.length);
   note('pool_by_slot_type', countBySlotType(filtered));
@@ -372,17 +373,23 @@ async function buildFetchQueues(ctx) {
 
     let crossTerms = crossRow?.search_terms ?? null;
     if (!crossTerms) {
-      try {
-        crossTerms = await expandCrossHobby(hobbyNames.map(h => h.name));
+      // Computing this is a ~6s Claude call, and it only feeds `adjacent` — two
+      // slots out of ten, which fall back to other slot types when empty. Making
+      // every card in a new profile's first batch wait on it isn't worth that, so
+      // it's computed in the background and picked up from cache next batch.
+      note('cross_hobby_expansion', 'deferred_to_background');
+      count('cross_hobby_deferred');
+      crossTerms = [];
+      runDetached('feed.crossHobbyExpansion', { combo_key: comboKey }, async () => {
+        const terms = await expandCrossHobby(hobbyNames.map(h => h.name));
         await sb.from('cross_hobby_expansions').upsert({
           combo_key: comboKey,
-          search_terms: crossTerms,
+          search_terms: terms,
           computed_at: new Date().toISOString(),
         }, { onConflict: 'combo_key' });
-      } catch (err) {
+      }, reportTrace).catch(err => {
         console.error('[Feed] Cross-hobby expansion error:', err.message);
-        crossTerms = [];
-      }
+      });
     }
 
     for (const bucket of budgetBuckets) {
@@ -534,6 +541,7 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
   const inflight = { interest: 0, adjacent: 0, wildcard: 0, occasion: 0 };
   const demand = slotDemand(batchSize);
 
+  const refilter = createIncrementalPoolFilter(ctx);
   let filtered = [];
   let dispatched = 0;
   let stoppedBecause = 'queues_exhausted';
@@ -608,7 +616,7 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
       await drainRelevance();
 
       const cpuStartedAt = performance.now();
-      filtered = filterItemPool(itemPool, ctx);
+      filtered = refilter(itemPool);
       const enough = hasEnoughCandidates(filtered, batchSize, canStillCover);
       count('cpu_filter_and_slotfill_ms', performance.now() - cpuStartedAt);
 
@@ -628,18 +636,24 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
 
   note('fetch_loop_exit', stoppedBecause);
   note('searches_run', dispatched);
-  return itemPool;
+  // Verdicts from that last drain may not have been applied yet, and searches
+  // still in flight when the loop stopped have since landed.
+  return { itemPool, filtered: refilter(itemPool) };
 }
 
 // ── Filter + slot fill ────────────────────────────────────
 
-function filterItemPool(itemPool, ctx) {
+/**
+ * A stateful accept-or-reject test for one item, holding the dedupe bookkeeping
+ * for everything it has already accepted.
+ */
+function createItemFilter(ctx) {
   const { profile, recentlyServed, recentlyServedTitles, suppressedAsins, suppressedClusters, relevance } = ctx;
   const seenAsins = new Set();
   const seenTitles = new Set();
   const kept = [];
 
-  return itemPool.filter(item => {
+  return (item) => {
     if (seenAsins.has(item.asin)) return false;
     const titleKey = normalizeProductTitle(item.title);
     if (titleKey && seenTitles.has(titleKey)) return false;
@@ -655,7 +669,31 @@ function filterItemPool(itemPool, ctx) {
     if (titleKey) seenTitles.add(titleKey);
     kept.push(item);
     return true;
-  });
+  };
+}
+
+/**
+ * Filters the pool as it grows, for callers that re-check after every search.
+ *
+ * Comparing each item against everything kept so far is quadratic, so filtering
+ * the whole pool from scratch on every completion cost seconds of CPU on a cold
+ * batch — the work was redone once per search instead of once per item. This
+ * carries the kept list between passes and only tests what has newly arrived.
+ */
+function createIncrementalPoolFilter(ctx) {
+  const accept = createItemFilter(ctx);
+  let kept = [];
+  let cursor = 0;
+
+  return (itemPool) => {
+    for (; cursor < itemPool.length; cursor += 1) {
+      if (accept(itemPool[cursor])) kept.push(itemPool[cursor]);
+    }
+    // A relevance verdict can land after its item was first accepted, so
+    // rejections are re-applied each pass. That check is per-item, not pairwise.
+    kept = kept.filter((item) => !isRejectedByRelevance(item, ctx.relevance));
+    return kept;
+  };
 }
 
 function relevanceKey(item) {
