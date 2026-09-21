@@ -44,6 +44,11 @@ const MAX_FETCH_TERMS = Number(process.env.FEED_MAX_FETCH_TERMS ?? 60);
 // indefinitely (the previous behaviour).
 const RELEVANCE_BUDGET_MS = Number(process.env.FEED_RELEVANCE_BUDGET_MS ?? 1500);
 
+// How many unrated items one request will pay Claude to classify while it
+// fetches. Caps the spend a single large pool can trigger; the rest is picked up
+// by the background pass after the response.
+const RELEVANCE_FETCH_ITEM_CAP = Number(process.env.FEED_RELEVANCE_FETCH_ITEM_CAP ?? 60);
+
 /**
  * Round-robin merge per-hobby term lists so no single hobby dominates the fetch
  * order. Without this the interest queue is grouped by hobby and the
@@ -171,9 +176,9 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     ctx.asinLastSeen,
     ctx.profile?.relationship ?? null,
   ));
-  feed = await span(
+  feed = syncSpan(
     'finalizeFeedRelevance',
-    () => finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById),
+    () => finalizeFeedRelevance(feed, filtered, ctx, batchSize),
     { picked: feed.length },
   );
 
@@ -565,6 +570,38 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
     dispatched < MAX_FETCH_TERMS
     && cursors[slotType] < (queues[slotType] ?? []).length;
 
+  // An item we've never served has no stored verdict, and getting one costs a
+  // ~1.4s Claude round trip. Asking for it here, while searches are still
+  // running, is what makes it affordable: the call overlaps Canopy latency
+  // instead of landing in front of the response. Verdicts that arrive get
+  // applied by the filter below, so a rejected item leaves the pool before the
+  // batch is ever picked from it.
+  const hobbyNameById = new Map((ctx.hobbyNames ?? []).map((h) => [h.id, h.name]));
+  const classifying = new Set();
+  let classifyingItems = 0;
+
+  const classifyNewItems = (items) => {
+    // Bounded so a large pool can't multiply Claude spend. Anything past the cap
+    // is left to the background pass after the response.
+    if (classifyingItems >= RELEVANCE_FETCH_ITEM_CAP) return;
+    const unrated = items.filter((item) => (
+      item.asin && item.hobby_id && item.title
+      && !ctx.relevance.has(`${item.asin}:${item.hobby_id}`)
+    ));
+    if (unrated.length === 0) return;
+    classifyingItems += unrated.length;
+
+    const pass = classifyHobbyRelevance(unrated, hobbyNameById, ctx.relevance)
+      .then((added) => {
+        for (const [key, affinity] of added) ctx.relevance.set(key, affinity);
+      })
+      .catch((err) => {
+        console.error('[Relevance] Fetch-phase classification failed:', err?.message ?? err);
+      })
+      .finally(() => classifying.delete(pass));
+    classifying.add(pass);
+  };
+
   const drainRelevance = async () => {
     if (relevanceInFlight) return relevanceInFlight;
     if (pendingRelevance.length === 0) return;
@@ -574,8 +611,35 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
       for (const [key, affinity] of await loadHobbyRelevance(batch)) {
         ctx.relevance.set(key, affinity);
       }
+      classifyNewItems(batch);
     })().finally(() => { relevanceInFlight = null; });
     return relevanceInFlight;
+  };
+
+  // Wait out whatever classification is still running once searching is done.
+  // On a cold batch there's nothing left to wait for — the calls have had the
+  // whole fetch to finish. The budget only bites on a warm batch that turned up
+  // genuinely new products, and giving up costs labels, not correctness: items
+  // already known to be rejected are still filtered out.
+  const settleClassification = async () => {
+    if (classifying.size === 0) return;
+    const pending = Promise.all([...classifying]);
+    if (RELEVANCE_BUDGET_MS <= 0) return pending;
+
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), RELEVANCE_BUDGET_MS);
+    });
+    const settled = await span(
+      'settleRelevance',
+      () => Promise.race([pending.then(() => true), deadline]),
+      { passes: classifying.size, items: classifyingItems },
+    );
+    clearTimeout(timer);
+    if (!settled) {
+      count('relevance_budget_exceeded');
+      note('relevance_budget_exceeded_ms', RELEVANCE_BUDGET_MS);
+    }
   };
 
   const worker = async () => {
@@ -640,11 +704,13 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
     { concurrency: FETCH_CONCURRENCY },
   );
   await drainRelevance();
+  await settleClassification();
 
   note('fetch_loop_exit', stoppedBecause);
   note('searches_run', dispatched);
-  // Verdicts from that last drain may not have been applied yet, and searches
-  // still in flight when the loop stopped have since landed.
+  note('relevance_classified_in_fetch', classifyingItems);
+  // Verdicts from that last drain and from classification may not have been
+  // applied yet, and searches still in flight when the loop stopped have landed.
   return { itemPool, filtered: refilter(itemPool) };
 }
 
@@ -713,46 +779,19 @@ function isRejectedByRelevance(item, relevance) {
 }
 
 /**
- * Classify the picked cards, drop any that score as unrelated, and refill
- * once if needed so the returned batch already has hobby_verified set.
+ * Drop cards the verdicts reject and refill once from what's left.
+ *
+ * Verdicts are gathered while searching now, so this makes no Claude call of its
+ * own — it applies what arrived. That's the whole point: a rejected item is kept
+ * out of the batch without a round trip in front of the response. An item still
+ * unrated here is served unlabelled, which costs a hobby chip rather than
+ * showing something unrelated, and the background pass rates it for next time.
  */
-async function finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById) {
-  const apply = async (items) => {
-    // Bounded wait: verdicts improve the batch but aren't worth an unbounded
-    // delay in front of it. Whatever hasn't answered by the deadline keeps
-    // running — it still writes to the table, so the next batch benefits — and
-    // the affected cards are served unlabelled, which is the same state as any
-    // item we've not classified yet.
-    const classification = classifyHobbyRelevance(items, hobbyNameById, ctx.relevance)
-      .then((added) => {
-        for (const [key, affinity] of added) ctx.relevance.set(key, affinity);
-        return true;
-      })
-      .catch((err) => {
-        console.error('[Relevance] Inline classification failed:', err?.message ?? err);
-        return true;
-      });
+function finalizeFeedRelevance(feed, filtered, ctx, batchSize) {
+  const rejected = feed.filter((item) => isRejectedByRelevance(item, ctx.relevance));
+  if (rejected.length === 0) return feed;
 
-    if (RELEVANCE_BUDGET_MS <= 0) return classification;
-
-    let timer;
-    const deadline = new Promise((resolve) => {
-      timer = setTimeout(() => resolve(false), RELEVANCE_BUDGET_MS);
-    });
-    const finishedInTime = await Promise.race([classification, deadline]);
-    clearTimeout(timer);
-    if (!finishedInTime) {
-      count('relevance_budget_exceeded');
-      note('relevance_budget_exceeded_ms', RELEVANCE_BUDGET_MS);
-    }
-    return finishedInTime;
-  };
-
-  await apply(feed);
-  if (!feed.some((item) => isRejectedByRelevance(item, ctx.relevance))) {
-    return feed;
-  }
-
+  count('relevance_rejected_in_batch', rejected.length);
   const pool = filtered.filter((item) => !isRejectedByRelevance(item, ctx.relevance));
   const refilled = fillFeedSlots(
     pool,
@@ -761,7 +800,6 @@ async function finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameBy
     ctx.asinLastSeen,
     ctx.profile?.relationship ?? null,
   );
-  await apply(refilled);
   return refilled.filter((item) => !isRejectedByRelevance(item, ctx.relevance));
 }
 
