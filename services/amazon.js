@@ -14,6 +14,7 @@
 import crypto from 'crypto';
 import { getDb } from '../db/index.js';
 import { loadAngles, loadBudgetBuckets, getBucketRanges } from './taxonomy.js';
+import { count, note, record } from './diag.js';
 
 // ── Taxonomy-driven constants (read from .txt files) ──────
 const ALL_ANGLES = loadAngles().map(a => a.name);
@@ -27,8 +28,10 @@ const DAILY_CALL_ALERT = Number(process.env.CANOPY_DAILY_CALL_ALERT ?? 7500);
 const CACHE_TTL_HOURS = 48;
 
 // Canopy is a REST API (higher throughput than PA-API's ~1 TPS), but we still
-// pace calls to stay polite and under plan rate limits.
-const MIN_REQUEST_INTERVAL_MS = Number(process.env.CANOPY_MIN_INTERVAL_MS ?? 250);
+// pace calls to stay polite and under plan rate limits. The queue is global, so
+// this interval is added latency for every concurrent search behind the first;
+// raise it back toward 250ms if Canopy starts returning 429s.
+const MIN_REQUEST_INTERVAL_MS = Number(process.env.CANOPY_MIN_INTERVAL_MS ?? 150);
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000; // exponential backoff: 2s, 4s, 8s
 
@@ -74,23 +77,102 @@ export function buildCacheKey(searchTerm, bucket) {
   return crypto.createHash('sha256').update(`${searchTerm}:${bucket}`).digest('hex');
 }
 
-// ── Daily API Call Tracking ───────────────────────────────
-async function getDailyCallCount() {
+/**
+ * Which of these (term, bucket) pairs are already cached and unexpired.
+ *
+ * Lets the feed spend its cached searches (~200ms) before any live one (~6s),
+ * in one round trip for the whole queue. A row can still turn out stale by
+ * content, so this is a strong hint rather than a guarantee.
+ *
+ * @param {{term: string, bucket: string}[]} entries
+ * @returns {Promise<Set<string>>} `${term}::${bucket}` for each warm entry
+ */
+export async function findWarmCacheKeys(entries) {
+  if (!entries?.length) return new Set();
+
   const sb = getDb();
-  const today = new Date().toISOString().slice(0, 10);
-  const { data } = await sb.rpc('get_daily_call_count', { p_date: today });
-  return data ?? 0;
+  const byKey = new Map();
+  for (const { term, bucket } of entries) {
+    byKey.set(buildCacheKey(term, bucket), `${term}::${bucket}`);
+  }
+
+  const keys = [...byKey.keys()];
+  const warm = new Set();
+  const now = new Date().toISOString();
+
+  // Chunked: a few hundred keys in one `in` filter overruns the request URL.
+  for (let i = 0; i < keys.length; i += 150) {
+    const { data, error } = await sb
+      .from('amazon_cache')
+      .select('cache_key')
+      .in('cache_key', keys.slice(i, i + 150))
+      .gt('expires_at', now);
+    if (error) {
+      console.error('[Canopy] Warm-cache lookup failed:', error.message);
+      return warm;
+    }
+    for (const row of data ?? []) {
+      const entry = byKey.get(row.cache_key);
+      if (entry) warm.add(entry);
+    }
+  }
+
+  return warm;
 }
 
-async function incrementDailyCallCount() {
+// ── Daily API Call Tracking ───────────────────────────────
+// The counter is a defensive ceiling, not billing, so it's held in memory and
+// re-read periodically rather than round-tripped on every call. Previously each
+// cache miss paid two extra sequential Supabase calls (read then increment) —
+// ~340ms of the ~5.8s miss, and more importantly two more chances to queue.
+const DAILY_COUNT_TTL_MS = Number(process.env.CANOPY_DAILY_COUNT_TTL_MS ?? 60_000);
+let _dailyCount = { date: null, value: 0, readAt: 0 };
+
+function utcDateKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function getDailyCallCount() {
+  const today = utcDateKey();
+  const fresh = _dailyCount.date === today
+    && Date.now() - _dailyCount.readAt < DAILY_COUNT_TTL_MS;
+  if (fresh) return _dailyCount.value;
+
   const sb = getDb();
-  const today = new Date().toISOString().slice(0, 10);
-  const { data } = await sb.rpc('increment_daily_calls', { p_date: today });
-  const count = data ?? 0;
-  if (count >= DAILY_CALL_ALERT) {
-    console.warn(`[Canopy] Daily API call count: ${count} (limit: ${DAILY_CALL_LIMIT})`);
+  const { data } = await sb.rpc('get_daily_call_count', { p_date: today });
+  _dailyCount = { date: today, value: data ?? 0, readAt: Date.now() };
+  return _dailyCount.value;
+}
+
+/**
+ * Count a call locally and persist it without blocking the caller.
+ *
+ * Supabase builders only issue their request when awaited, so the write is
+ * kicked off with `.then()` rather than left as a bare expression.
+ */
+function incrementDailyCallCount() {
+  const today = utcDateKey();
+  if (_dailyCount.date !== today) {
+    _dailyCount = { date: today, value: 0, readAt: Date.now() };
   }
-  return count;
+  _dailyCount.value += 1;
+
+  if (_dailyCount.value >= DAILY_CALL_ALERT) {
+    console.warn(`[Canopy] Daily API call count: ${_dailyCount.value} (limit: ${DAILY_CALL_LIMIT})`);
+  }
+
+  getDb()
+    .rpc('increment_daily_calls', { p_date: today })
+    .then(
+      ({ data }) => {
+        // Trust the authoritative value when it comes back.
+        if (typeof data === 'number' && data > _dailyCount.value) {
+          _dailyCount.value = data;
+        }
+      },
+      (err) => console.error('[Canopy] Daily call count write failed:', err?.message ?? err),
+    );
+  return _dailyCount.value;
 }
 
 // ── Rate Limiter (queue-based for concurrent safety) ─────
@@ -102,8 +184,14 @@ async function throttle() {
   _nextAvailableTime = myTurn + MIN_REQUEST_INTERVAL_MS;
   const waitMs = myTurn - now;
   if (waitMs > 0) {
+    // The queue is process-global, so this counter shows how much of a request's
+    // latency came from waiting behind other in-flight searches (including
+    // background prefetch/refresh work) rather than from Canopy itself.
+    count('canopy_throttle_wait_ms', waitMs);
+    count('canopy_throttled_calls');
     await new Promise(r => setTimeout(r, waitMs));
   }
+  return waitMs;
 }
 
 // ── Product URL / affiliate tagging ───────────────────────
@@ -152,7 +240,8 @@ async function callCanopyAPI(searchTerm, minPrice, maxPrice) {
   const url = `${CANOPY_SEARCH_URL}?${params.toString()}`;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    await throttle();
+    const waitedMs = await throttle();
+    const startedAt = performance.now();
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -175,17 +264,34 @@ async function callCanopyAPI(searchTerm, minPrice, maxPrice) {
 
       const body = await response.json();
       const results = body?.data?.amazonProductSearchResults?.productResults?.results ?? [];
-      return results
+      const items = results
         .slice(0, SEARCH_ITEM_COUNT)
         .map(mapSearchResult)
         .filter(Boolean);
+      record('canopy', 'search', performance.now() - startedAt, {
+        term: searchTerm,
+        attempt: attempt + 1,
+        throttle_ms: Math.round(waitedMs),
+        items: items.length,
+      });
+      count('canopy_calls');
+      return items;
     } catch (err) {
       const status = err.statusCode ?? err.status;
+      record('canopy', 'search', performance.now() - startedAt, {
+        term: searchTerm,
+        attempt: attempt + 1,
+        throttle_ms: Math.round(waitedMs),
+        failed: status ?? err.name,
+      });
+      count('canopy_calls');
       const retryable = status === 429 || status === 500 || status === 502
         || status === 503 || status === 504 || err.name === 'AbortError';
       if (retryable && attempt < MAX_RETRIES) {
         const backoff = RETRY_BASE_MS * Math.pow(2, attempt);
         console.warn(`[Canopy] ${status ?? err.name} for "${searchTerm}", retrying in ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        count('canopy_retries');
+        count('canopy_retry_backoff_ms', backoff);
         await new Promise(r => setTimeout(r, backoff));
         continue;
       }
@@ -230,14 +336,40 @@ async function refreshCacheRow(sb, row) {
     cached_at: new Date().toISOString(),
     hit_count: 0,
   }).eq('cache_key', row.cache_key);
-  await incrementDailyCallCount();
+  incrementDailyCallCount();
   return true;
 }
 
 // ── Cache Resolution Flow (§6.3) ──────────────────────────
-export async function getItemsForSearchTerm(searchTerm, bucket) {
-  const sb = getDb();
+
+/**
+ * Searches for the same (term, bucket) that are already running.
+ *
+ * The cache only helps once a search has finished writing, so overlapping
+ * callers used to each pay a full live search for the identical query — the
+ * session's background prefetch and the first feed request did exactly this,
+ * duplicating whole seconds of Canopy latency. Sharing the in-flight promise
+ * makes the second caller free.
+ */
+const _inflightSearches = new Map();
+
+export function getItemsForSearchTerm(searchTerm, bucket) {
   const key = buildCacheKey(searchTerm, bucket);
+
+  const existing = _inflightSearches.get(key);
+  if (existing) {
+    count('search_coalesced');
+    return existing;
+  }
+
+  const search = resolveItemsForSearchTerm(searchTerm, bucket, key)
+    .finally(() => _inflightSearches.delete(key));
+  _inflightSearches.set(key, search);
+  return search;
+}
+
+async function resolveItemsForSearchTerm(searchTerm, bucket, key) {
+  const sb = getDb();
 
   // Check cache
   const { data: cached } = await sb
@@ -250,19 +382,28 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
   if (cached) {
     const items = cached.items ?? [];
     if (!cacheItemsNeedRefresh(items)) {
-      sb.rpc('increment_cache_hit', { p_cache_key: key }); // fire and forget
+      // `.then()` matters: a Supabase builder never sends its request until it's
+      // subscribed to, so the previous bare call left hit_count permanently 0 —
+      // which also made refreshExpiringCache's hit_count ordering meaningless.
+      sb.rpc('increment_cache_hit', { p_cache_key: key }).then(undefined, () => {});
+      count('cache_hits');
       return items.map(item => ({
         ...item,
         image_url: normalizeAmazonImageUrl(item.image_url),
       }));
     }
     // Stale entry — refetch and update row in place (no delete)
+    count('cache_stale');
+  } else {
+    count('cache_misses');
   }
 
   // Check daily limit
   const dailyCount = await getDailyCallCount();
   if (dailyCount >= DAILY_CALL_LIMIT) {
     console.warn(`[Canopy] Daily API limit reached (${dailyCount}). Skipping: ${searchTerm}`);
+    count('cache_skipped_over_daily_limit');
+    note('canopy_daily_limit_reached', true);
     return [];
   }
 
@@ -270,11 +411,15 @@ export async function getItemsForSearchTerm(searchTerm, bucket) {
   const [minPrice, maxPrice] = BUCKET_RANGES[bucket] ?? [0, 9999];
   try {
     const items = await callCanopyAPI(searchTerm, minPrice, maxPrice);
-    await writeCacheEntry(sb, { cache_key: key, search_term: searchTerm, budget_bucket: bucket, items });
-    await incrementDailyCallCount();
+    incrementDailyCallCount();
+    // Don't make the caller wait on the cache write — the items are already in
+    // hand, and a failed write only costs a repeat search later.
+    writeCacheEntry(sb, { cache_key: key, search_term: searchTerm, budget_bucket: bucket, items })
+      .catch((err) => console.error(`[Canopy] Cache write failed for "${searchTerm}":`, err?.message ?? err));
     return items;
   } catch (err) {
     console.error(`[Canopy] API error for "${searchTerm}" [${bucket}]:`, err.message ?? err);
+    count('canopy_failed_terms');
     return [];
   }
 }
@@ -331,8 +476,11 @@ export async function refreshExpiringCache({ limit = 100 } = {}) {
 
 // ── Get Daily API Usage ───────────────────────────────────
 export async function getDailyApiUsage() {
+  // Admin reporting reads through to the table rather than the in-memory
+  // counter, which is only meant to keep the ceiling cheap to check.
+  _dailyCount.readAt = 0;
   const count = await getDailyCallCount();
-  return { date: new Date().toISOString().slice(0, 10), count, limit: DAILY_CALL_LIMIT };
+  return { date: utcDateKey(), count, limit: DAILY_CALL_LIMIT };
 }
 
 export { ALL_BUDGET_BUCKETS, BUCKET_RANGES };

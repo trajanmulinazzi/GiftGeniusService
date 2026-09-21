@@ -4,7 +4,7 @@
  */
 
 import { getDb } from '../db/index.js';
-import { getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
+import { findWarmCacheKeys, getItemsForSearchTerm, resolveBudgetBuckets } from './amazon.js';
 import { loadAngles } from './taxonomy.js';
 import { expandCrossHobby } from './claude.js';
 import { relationshipAngleMultiplier } from './relationship-priors.js';
@@ -16,6 +16,7 @@ import {
   isHobbyVerified,
   loadHobbyRelevance,
 } from './relevance.js';
+import { addMeta, count, note, reportTrace, runDetached, span, syncSpan } from './diag.js';
 
 const ALL_ANGLES = loadAngles().map(a => a.name);
 
@@ -26,8 +27,22 @@ const SLOT_PATTERN = [
 ];
 
 const MAX_CONSECUTIVE_SAME_CLUSTER = 2;
-const FETCH_CHUNK_SIZE = 6;
-const MAX_FETCH_ROUNDS = 20;
+
+// Searches run as a continuous pool rather than in fixed rounds, so this is how
+// many may be in flight at once, not a barrier width. A live Canopy search takes
+// seconds, so the work is entirely I/O-bound; a cold batch needs ~13 searches,
+// and fitting those into one wave is what keeps a cold start near the cost of a
+// single search rather than a multiple of it. Canopy's request rate is still
+// paced by the throttle in amazon.js.
+const FETCH_CONCURRENCY = Number(process.env.FEED_FETCH_CONCURRENCY ?? 10);
+
+// Hard ceiling on searches per batch, so an unproductive queue can't spin.
+const MAX_FETCH_TERMS = Number(process.env.FEED_MAX_FETCH_TERMS ?? 60);
+
+// How long a request will wait on Claude relevance verdicts before serving the
+// batch unlabelled and letting classification finish in the background. 0 waits
+// indefinitely (the previous behaviour).
+const RELEVANCE_BUDGET_MS = Number(process.env.FEED_RELEVANCE_BUDGET_MS ?? 1500);
 
 /**
  * Round-robin merge per-hobby term lists so no single hobby dominates the fetch
@@ -83,8 +98,19 @@ function logGiftCardHit(ctx, phase, item, extra = {}) {
  * @param {import('fastify').FastifyBaseLogger} [options.log] Fastify request logger (shows on Render)
  */
 export async function generateFeed(sessionId, profileId, batchSize = 10, options = {}) {
-  const ctx = await loadFeedContext(sessionId, profileId);
+  const ctx = await span('loadFeedContext', () => loadFeedContext(sessionId, profileId));
   ctx.log = options.log ?? null;
+
+  addMeta({
+    profile: ctx.profile?.label,
+    hobbies: (ctx.hobbyNames ?? []).length,
+    occasion: ctx.occasion,
+    budget: `${ctx.profile?.budget_min}-${ctx.profile?.budget_max}`,
+    buckets: ctx.budgetBuckets.length,
+    batch: batchSize,
+  });
+  note('recently_served_asins', ctx.recentlyServed.size);
+  note('suppressed_asins', ctx.suppressedAsins.size);
 
   feedLog(ctx, '[Feed] Profile interests for session', {
     session_id: sessionId,
@@ -96,16 +122,29 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     interests: (ctx.hobbyNames ?? []).map((h) => ({ id: h.id, name: h.name })),
   });
 
-  const queues = await buildFetchQueues(ctx);
+  const queues = await span('buildFetchQueues', () => buildFetchQueues(ctx));
+  await span('orderQueuesCacheFirst', () => orderQueuesCacheFirst(queues));
   feedLog(ctx, '[Feed] Fetch queue sizes', {
     interest: queues.interest.length,
     adjacent: queues.adjacent.length,
     wildcard: queues.wildcard.length,
     occasion: queues.occasion.length,
   });
+  note('queue_sizes', {
+    interest: queues.interest.length,
+    adjacent: queues.adjacent.length,
+    wildcard: queues.wildcard.length,
+    occasion: queues.occasion.length,
+  });
 
-  const itemPool = await fetchItemPoolIncremental(queues, ctx, batchSize);
-  const filtered = filterItemPool(itemPool, ctx);
+  const itemPool = await span(
+    'fetchItemPool',
+    () => fetchItemPoolIncremental(queues, ctx, batchSize),
+  );
+  const filtered = syncSpan('filterItemPool', () => filterItemPool(itemPool, ctx));
+  note('pool_size', itemPool.length);
+  note('pool_after_filters', filtered.length);
+  note('pool_by_slot_type', countBySlotType(filtered));
 
   const giftCardsInPool = filtered.filter(isGiftCardItem);
   feedLog(ctx, '[Feed] Pool summary', {
@@ -124,14 +163,18 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
   // Score the cards we are about to show *before* insert. Background-only
   // classification is too late: served ASINs are suppressed, so the user
   // never sees the hobby chip on an item we only labelled after they left.
-  let feed = fillFeedSlots(
+  let feed = syncSpan('fillFeedSlots', () => fillFeedSlots(
     filtered,
     batchSize,
     ctx.weights,
     ctx.asinLastSeen,
     ctx.profile?.relationship ?? null,
+  ));
+  feed = await span(
+    'finalizeFeedRelevance',
+    () => finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById),
+    { picked: feed.length },
   );
-  feed = await finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById);
 
   for (const item of feed) {
     if (isGiftCardItem(item)) {
@@ -142,9 +185,10 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
     }
   }
 
-  const events = await insertFeedEvents(
+  const events = await span('insertFeedEvents', () => insertFeedEvents(
     ctx.sb, sessionId, profileId, feed, ctx.hobbyNames, ctx.relevance,
-  );
+  ), { rows: feed.length });
+  note('items_returned', events.length);
 
   classifyUnratedInBackground(filtered, hobbyNameById, ctx.relevance);
 
@@ -158,16 +202,25 @@ export async function generateFeed(sessionId, profileId, batchSize = 10, options
 export function prefetchFeedCache(profileId, occasion) {
   setImmediate(async () => {
     try {
-      const ctx = await loadFeedContext(null, profileId, occasion);
-      const queues = await buildFetchQueues(ctx);
-      const warmPerSlot = 2;
-      const tasks = [];
-      for (const slotType of ['interest', 'adjacent', 'wildcard', 'occasion']) {
-        for (const entry of (queues[slotType] ?? []).slice(0, warmPerSlot)) {
-          tasks.push(getItemsForSearchTerm(entry.term, entry.bucket));
+      // Traced separately: this runs after the session response has gone out, so
+      // its cost shows up to the user as polling time, not request time.
+      await runDetached('feed.prefetch', { profile_id: profileId, occasion }, async () => {
+        const ctx = await span('loadFeedContext', () => loadFeedContext(null, profileId, occasion));
+        const queues = await span('buildFetchQueues', () => buildFetchQueues(ctx));
+        // Warm roughly what a first batch consumes rather than a token couple of
+        // terms. This runs while the client is polling a preparing feed, so time
+        // spent here is time the user was already going to wait — and it turns
+        // their first real request from ~13 live searches into mostly hits.
+        const warmPerSlot = Number(process.env.FEED_PREFETCH_PER_SLOT ?? 4);
+        const tasks = [];
+        for (const slotType of ['interest', 'adjacent', 'wildcard', 'occasion']) {
+          for (const entry of (queues[slotType] ?? []).slice(0, warmPerSlot)) {
+            tasks.push(getItemsForSearchTerm(entry.term, entry.bucket));
+          }
         }
-      }
-      await Promise.all(tasks);
+        note('terms_warmed', tasks.length);
+        await span('warmCache', () => Promise.all(tasks), { terms: tasks.length });
+      }, reportTrace);
     } catch (err) {
       console.error('[Feed] Prefetch error:', err.message);
     }
@@ -179,40 +232,43 @@ export function prefetchFeedCache(profileId, occasion) {
 async function loadFeedContext(sessionId, profileId, occasionOverride) {
   const sb = getDb();
 
-  const { data: profile, error: profileErr } = await sb
-    .from('profiles').select('*').eq('id', profileId).single();
+  // One wave instead of five sequential round trips: none of these depend on
+  // each other, and at ~150ms each the serial version cost most of a second
+  // before any search had started.
+  const [
+    { data: profile, error: profileErr },
+    { data: weightsRows },
+    { data: sessionRow },
+    { data: suppressions },
+    { data: recentEvents },
+  ] = await Promise.all([
+    sb.from('profiles').select('*').eq('id', profileId).single(),
+    sb.from('profile_weights').select('*').eq('profile_id', profileId),
+    !occasionOverride && sessionId
+      ? sb.from('sessions').select('occasion').eq('id', sessionId).single()
+      : Promise.resolve({ data: null }),
+    sb.from('dislike_suppressions').select('*').eq('profile_id', profileId),
+    sb.from('feed_events')
+      .select('item_asin, item_snapshot, signal, served_at')
+      .eq('profile_id', profileId)
+      .order('served_at', { ascending: false })
+      .limit(500),
+  ]);
   if (profileErr || !profile) throw new Error('Profile not found');
 
-  const { data: weightsRows } = await sb
-    .from('profile_weights').select('*').eq('profile_id', profileId);
   const weights = {};
   for (const w of (weightsRows ?? [])) {
     weights[`${w.hobby_id}:${w.angle}`] = w;
   }
 
-  let occasion = occasionOverride;
-  if (!occasion && sessionId) {
-    const { data: session } = await sb
-      .from('sessions').select('occasion').eq('id', sessionId).single();
-    occasion = session?.occasion ?? 'just_because';
-  }
-  occasion ??= 'just_because';
+  const occasion = occasionOverride ?? sessionRow?.occasion ?? 'just_because';
 
-  const { data: suppressions } = await sb
-    .from('dislike_suppressions').select('*').eq('profile_id', profileId);
   const suppressedAsins = new Set();
   const suppressedClusters = new Set();
   for (const s of (suppressions ?? [])) {
     if (s.suppression_type === 'item') suppressedAsins.add(s.item_asin);
     if (s.suppression_type === 'cluster') suppressedClusters.add(`${s.hobby_id}:${s.angle}`);
   }
-
-  const { data: recentEvents } = await sb
-    .from('feed_events')
-    .select('item_asin, item_snapshot, signal, served_at')
-    .eq('profile_id', profileId)
-    .order('served_at', { ascending: false })
-    .limit(500);
 
   const now = Date.now();
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -379,67 +435,152 @@ function countBySlotType(items) {
   return counts;
 }
 
-function pickFetchChunk(queues, cursors, chunkSize, filtered, batchSize) {
-  const chunk = [];
-  const needed = slotTypesNeeded(batchSize);
+const SLOT_TYPES = ['interest', 'adjacent', 'wildcard', 'occasion'];
+
+/**
+ * Move already-cached searches to the front of every queue.
+ *
+ * A cached search returns in ~200ms and a live one took ~6s on measurement, so
+ * ordering by warmth is the difference between filling a batch from cache and
+ * paying Canopy for it. Relative order within the warm and cold groups is kept,
+ * which preserves the per-hobby interleaving built above.
+ */
+async function orderQueuesCacheFirst(queues) {
+  const entries = SLOT_TYPES.flatMap((slot) => queues[slot] ?? []);
+  if (entries.length === 0) return;
+
+  const warm = await findWarmCacheKeys(entries);
+  if (warm.size === 0) {
+    note('warm_terms', 0);
+    return;
+  }
+
+  const isWarm = (entry) => warm.has(`${entry.term}::${entry.bucket}`);
+  for (const slot of SLOT_TYPES) {
+    const queue = queues[slot] ?? [];
+    queues[slot] = [...queue.filter(isWarm), ...queue.filter((e) => !isWarm(e))];
+  }
+  note('warm_terms', warm.size);
+  note('total_terms', entries.length);
+}
+
+/** How many slots of each type a batch of this size needs. */
+function slotDemand(batchSize) {
+  const demand = { interest: 0, adjacent: 0, wildcard: 0, occasion: 0 };
+  for (let i = 0; i < batchSize; i++) {
+    demand[SLOT_PATTERN[i % SLOT_PATTERN.length]]++;
+  }
+  return demand;
+}
+
+/**
+ * Choose the next search to run: the slot type furthest from having its share of
+ * the batch filled, counting both candidates already found and searches still in
+ * flight. Picking one at a time (rather than a fixed chunk per slot type) keeps
+ * every slot type progressing together, so a batch can usually be filled in one
+ * wave instead of needing a second and third round.
+ */
+function pickNextTerm(queues, cursors, filtered, demand, inflight) {
   const counts = countBySlotType(filtered);
-  const slotOrder = [...needed].sort((a, b) => counts[a] - counts[b]);
-
-  for (const slotType of slotOrder) {
-    const queue = queues[slotType] ?? [];
-    while (chunk.length < chunkSize && cursors[slotType] < queue.length) {
-      chunk.push(queue[cursors[slotType]++]);
-    }
-  }
-
-  if (chunk.length < chunkSize) {
-    for (const slotType of ['interest', 'adjacent', 'wildcard', 'occasion']) {
-      const queue = queues[slotType] ?? [];
-      while (chunk.length < chunkSize && cursors[slotType] < queue.length) {
-        chunk.push(queue[cursors[slotType]++]);
-      }
-    }
-  }
-
-  return chunk;
-}
-
-function queuesExhausted(queues, cursors) {
-  return ['interest', 'adjacent', 'wildcard', 'occasion'].every(
-    slot => (cursors[slot] ?? 0) >= (queues[slot] ?? []).length
+  const available = SLOT_TYPES.filter(
+    (slot) => cursors[slot] < (queues[slot] ?? []).length,
   );
+  if (available.length === 0) return null;
+
+  const wanted = available.filter((slot) => demand[slot] > 0);
+  const pool = wanted.length > 0 ? wanted : available;
+  const satisfaction = (slot) =>
+    (counts[slot] + (inflight[slot] ?? 0)) / (demand[slot] || 0.5);
+
+  pool.sort((a, b) => satisfaction(a) - satisfaction(b));
+  const slot = pool[0];
+  return queues[slot][cursors[slot]++];
 }
 
-function hasEnoughCandidates(filtered, batchSize) {
+/**
+ * @param {(slotType: string) => boolean} [canStillCover] Whether more searches
+ *   could yet produce a candidate for a slot type. Fetching stops as soon as the
+ *   batch is fillable, so without this a slot type with no candidates yet —
+ *   wildcard, typically, since the pattern only asks for one — gets dropped from
+ *   the batch instead of waited for.
+ */
+function hasEnoughCandidates(filtered, batchSize, canStillCover = () => false) {
   if (filtered.length < batchSize) return false;
 
   const needed = slotTypesNeeded(batchSize);
   const counts = countBySlotType(filtered);
 
   for (const slot of needed) {
-    if (counts[slot] < 1 && filtered.length < batchSize * 2) return false;
+    if (counts[slot] < 1 && canStillCover(slot)) return false;
   }
 
   return filtered.length >= batchSize * 2
     || canFillFeedSlots(filtered, batchSize, {}, {});
 }
 
+/**
+ * Fetch until the batch can be filled, running searches as a continuous pool.
+ *
+ * The previous shape was fixed rounds of six: every round waited for its slowest
+ * search before the next could start, so three rounds cost the sum of three
+ * worst cases rather than the worst case overall. Here a finished worker starts
+ * its next search immediately, and the whole pool stops as soon as there are
+ * enough candidates — searches already in flight are allowed to land, since
+ * their cost is sunk and their items are still useful.
+ */
 async function fetchItemPoolIncremental(queues, ctx, batchSize) {
   const itemPool = [];
   const cursors = { interest: 0, adjacent: 0, wildcard: 0, occasion: 0 };
+  const inflight = { interest: 0, adjacent: 0, wildcard: 0, occasion: 0 };
+  const demand = slotDemand(batchSize);
 
-  for (let round = 0; round < MAX_FETCH_ROUNDS; round++) {
-    const filtered = filterItemPool(itemPool, ctx);
-    if (hasEnoughCandidates(filtered, batchSize)) break;
-    if (queuesExhausted(queues, cursors)) break;
+  let filtered = [];
+  let dispatched = 0;
+  let stoppedBecause = 'queues_exhausted';
+  let stop = false;
 
-    const chunk = pickFetchChunk(queues, cursors, FETCH_CHUNK_SIZE, filtered, batchSize);
-    if (chunk.length === 0) break;
+  // Relevance lookups are coalesced: items from concurrent searches are pooled
+  // and looked up together, so the pool isn't issuing one query per search.
+  let pendingRelevance = [];
+  let relevanceInFlight = null;
 
-    const results = await Promise.all(
-      chunk.map(async ({ term, bucket, meta }) => {
+  // Only hold out for a slot type that still has unused terms and budget left,
+  // so a slot whose searches keep coming back empty can't stall the batch.
+  const canStillCover = (slotType) =>
+    dispatched < MAX_FETCH_TERMS
+    && cursors[slotType] < (queues[slotType] ?? []).length;
+
+  const drainRelevance = async () => {
+    if (relevanceInFlight) return relevanceInFlight;
+    if (pendingRelevance.length === 0) return;
+    const batch = pendingRelevance;
+    pendingRelevance = [];
+    relevanceInFlight = (async () => {
+      for (const [key, affinity] of await loadHobbyRelevance(batch)) {
+        ctx.relevance.set(key, affinity);
+      }
+    })().finally(() => { relevanceInFlight = null; });
+    return relevanceInFlight;
+  };
+
+  const worker = async () => {
+    while (!stop) {
+      if (dispatched >= MAX_FETCH_TERMS) {
+        stoppedBecause = 'max_terms';
+        stop = true;
+        return;
+      }
+
+      const entry = pickNextTerm(queues, cursors, filtered, demand, inflight);
+      if (!entry) return;
+
+      const { term, bucket, meta } = entry;
+      dispatched += 1;
+      inflight[meta.slot_type] = (inflight[meta.slot_type] ?? 0) + 1;
+
+      try {
         const items = await getItemsForSearchTerm(term, bucket);
-        const tagged = items.map(item => ({ ...item, ...meta, source_term: term }));
+        const tagged = items.map((item) => ({ ...item, ...meta, source_term: term }));
 
         const giftCards = tagged.filter(isGiftCardItem);
         if (giftCards.length > 0) {
@@ -456,19 +597,37 @@ async function fetchItemPoolIncremental(queues, ctx, batchSize) {
           });
         }
 
-        return tagged;
-      })
-    );
-    const fetched = results.flat();
-    itemPool.push(...fetched);
+        itemPool.push(...tagged);
+        pendingRelevance.push(...tagged);
+      } finally {
+        inflight[meta.slot_type] -= 1;
+      }
 
-    // Pull verdicts in the same round the items arrive, so the "do we have
-    // enough candidates" check below counts only items we'd actually serve.
-    for (const [key, affinity] of await loadHobbyRelevance(fetched)) {
-      ctx.relevance.set(key, affinity);
+      // Verdicts must land before the candidate count is trusted, or rejected
+      // items would be counted as fillable and the loop would stop early.
+      await drainRelevance();
+
+      const cpuStartedAt = performance.now();
+      filtered = filterItemPool(itemPool, ctx);
+      const enough = hasEnoughCandidates(filtered, batchSize, canStillCover);
+      count('cpu_filter_and_slotfill_ms', performance.now() - cpuStartedAt);
+
+      if (enough) {
+        stoppedBecause = 'enough_candidates';
+        stop = true;
+      }
     }
-  }
+  };
 
+  await span(
+    'searchPool',
+    () => Promise.all(Array.from({ length: FETCH_CONCURRENCY }, worker)),
+    { concurrency: FETCH_CONCURRENCY },
+  );
+  await drainRelevance();
+
+  note('fetch_loop_exit', stoppedBecause);
+  note('searches_run', dispatched);
   return itemPool;
 }
 
@@ -514,8 +673,34 @@ function isRejectedByRelevance(item, relevance) {
  */
 async function finalizeFeedRelevance(feed, filtered, ctx, batchSize, hobbyNameById) {
   const apply = async (items) => {
-    const added = await classifyHobbyRelevance(items, hobbyNameById, ctx.relevance);
-    for (const [key, affinity] of added) ctx.relevance.set(key, affinity);
+    // Bounded wait: verdicts improve the batch but aren't worth an unbounded
+    // delay in front of it. Whatever hasn't answered by the deadline keeps
+    // running — it still writes to the table, so the next batch benefits — and
+    // the affected cards are served unlabelled, which is the same state as any
+    // item we've not classified yet.
+    const classification = classifyHobbyRelevance(items, hobbyNameById, ctx.relevance)
+      .then((added) => {
+        for (const [key, affinity] of added) ctx.relevance.set(key, affinity);
+        return true;
+      })
+      .catch((err) => {
+        console.error('[Relevance] Inline classification failed:', err?.message ?? err);
+        return true;
+      });
+
+    if (RELEVANCE_BUDGET_MS <= 0) return classification;
+
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), RELEVANCE_BUDGET_MS);
+    });
+    const finishedInTime = await Promise.race([classification, deadline]);
+    clearTimeout(timer);
+    if (!finishedInTime) {
+      count('relevance_budget_exceeded');
+      note('relevance_budget_exceeded_ms', RELEVANCE_BUDGET_MS);
+    }
+    return finishedInTime;
   };
 
   await apply(feed);

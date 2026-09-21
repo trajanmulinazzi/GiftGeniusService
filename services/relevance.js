@@ -14,6 +14,7 @@
 
 import { getDb } from '../db/index.js';
 import { rateHobbyRelevance, CLAUDE_MODEL } from './claude.js';
+import { count, span } from './diag.js';
 
 /** At or above this, the product is genuinely hobby gear — safe to label. */
 export const MIN_VERIFIED_AFFINITY = 0.6;
@@ -101,48 +102,65 @@ export async function classifyHobbyRelevance(items, hobbyNameById, knownScores =
   if (byHobby.size === 0) return written;
 
   const sb = getDb();
+  const unrated = [...byHobby.values()].reduce((n, list) => n + list.length, 0);
+  count('relevance_items_classified', unrated);
 
+  const classifyBatch = async (hobbyId, hobbyName, batch) => {
+    try {
+      const scores = await rateHobbyRelevance(hobbyName, batch);
+      const rows = batch
+        .filter((p) => scores.has(p.asin))
+        .map((p) => ({
+          item_asin: p.asin,
+          hobby_id: hobbyId,
+          affinity: scores.get(p.asin),
+          title: p.title,
+          model: CLAUDE_MODEL,
+          checked_at: new Date().toISOString(),
+        }));
+      if (rows.length === 0) return;
+
+      const { error } = await sb
+        .from('item_hobby_relevance')
+        .upsert(rows, { onConflict: 'item_asin,hobby_id' });
+      if (error) throw new Error(error.message);
+
+      for (const row of rows) {
+        written.set(pairKey(row.item_asin, row.hobby_id), row.affinity);
+      }
+    } catch (err) {
+      console.error(
+        `[Relevance] Classification failed for "${hobbyName}":`,
+        err.message ?? err,
+      );
+    }
+  };
+
+  // One batch per (hobby, chunk), all at once. These were sequential, which cost
+  // a full Claude round trip each — ~1.4s apiece even for a handful of items —
+  // while the user waited on the feed request.
+  const batches = [];
   for (const [hobbyId, products] of byHobby) {
     const hobbyName = hobbyNameById.get(hobbyId);
     if (!hobbyName) continue;
-
     for (let i = 0; i < products.length; i += BATCH_SIZE) {
-      const batch = products.slice(i, i + BATCH_SIZE);
-      try {
-        const scores = await rateHobbyRelevance(hobbyName, batch);
-        const rows = batch
-          .filter((p) => scores.has(p.asin))
-          .map((p) => ({
-            item_asin: p.asin,
-            hobby_id: hobbyId,
-            affinity: scores.get(p.asin),
-            title: p.title,
-            model: CLAUDE_MODEL,
-            checked_at: new Date().toISOString(),
-          }));
-        if (rows.length === 0) continue;
-
-        const { error } = await sb
-          .from('item_hobby_relevance')
-          .upsert(rows, { onConflict: 'item_asin,hobby_id' });
-        if (error) throw new Error(error.message);
-
-        for (const row of rows) {
-          written.set(pairKey(row.item_asin, row.hobby_id), row.affinity);
-        }
-      } catch (err) {
-        console.error(
-          `[Relevance] Classification failed for "${hobbyName}":`,
-          err.message ?? err,
-        );
-      }
+      batches.push([hobbyId, hobbyName, products.slice(i, i + BATCH_SIZE)]);
     }
   }
 
-  if (written.size > 0) {
-    console.log(`[Relevance] Classified ${written.size} item/hobby pairs`);
-  }
-  return written;
+  const classifyAll = async () => {
+    await Promise.all(batches.map((args) => classifyBatch(...args)));
+    if (written.size > 0) {
+      console.log(`[Relevance] Classified ${written.size} item/hobby pairs`);
+    }
+    return written;
+  };
+
+  return span('relevance.classify', classifyAll, {
+    hobbies: byHobby.size,
+    items: unrated,
+    batches: batches.length,
+  });
 }
 
 /**
