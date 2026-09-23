@@ -836,6 +836,13 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
   const usedAsins = new Set();
   const lastClusters = [];
   let giftCardsPicked = 0;
+  // How many cards each hobby has already contributed. Interest/wildcard slots
+  // draw from the hobby shown least so far, so a batch spreads evenly across
+  // every hobby on the profile instead of concentrating on whichever one's
+  // searches happened to fill the pool. On a brand-new feed all hobby weights
+  // are equal, so without this the near-random score picks one or two hobbies.
+  const hobbyPicks = new Map();
+  const picksFor = (hobbyId) => (hobbyId ? hobbyPicks.get(hobbyId) ?? 0 : 0);
 
   for (let i = 0; i < batchSize; i++) {
     const slotType = SLOT_PATTERN[i % SLOT_PATTERN.length];
@@ -868,11 +875,18 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
     }
     if (candidates.length === 0) break;
 
-    // Prefer real products over gift cards when scores are close.
+    // Prefer real products over gift cards when scores are close, then balance
+    // across hobbies (fewest-shown hobby first), then by score. The hobby tier
+    // only reorders two hobby-bearing candidates from different hobbies; cards
+    // without a hobby (adjacent/occasion) fall straight through to score.
     candidates.sort((a, b) => {
       const aGift = isGiftCardItem(a) ? 1 : 0;
       const bGift = isGiftCardItem(b) ? 1 : 0;
       if (aGift !== bGift) return aGift - bGift;
+      if (a.hobby_id && b.hobby_id && a.hobby_id !== b.hobby_id) {
+        const balance = picksFor(a.hobby_id) - picksFor(b.hobby_id);
+        if (balance !== 0) return balance;
+      }
       return b.score - a.score;
     });
 
@@ -892,6 +906,7 @@ function fillFeedSlots(filtered, batchSize, weights, asinLastSeen, relationship 
     feed.push(picked);
     usedAsins.add(picked.asin);
     if (isGiftCardItem(picked)) giftCardsPicked += 1;
+    if (picked.hobby_id) hobbyPicks.set(picked.hobby_id, picksFor(picked.hobby_id) + 1);
     lastClusters.push(picked.hobby_id && picked.angle ? `${picked.hobby_id}:${picked.angle}` : 'none');
   }
 
